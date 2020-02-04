@@ -2,6 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+from numpy.fft import fft2, fftshift
 
 import zernike as zern
 
@@ -261,4 +262,97 @@ def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0):
 
     return H_matrix, pupil, H_flat
 
+# ==================================================================================================================== #
+#                                          ~~ Point Spread Function ~~
+# ==================================================================================================================== #
 
+class PointSpreadFunction(object):
+    """
+    PointSpreadFunction is in charge of computing the PSF images
+    """
+
+    def __init__(self, matrices, N_pix, crop_pix, diversity_coef):
+        """
+        This class is independent of the Wavefront model, it works for both Actuator Model and Zernike
+
+        Units for aberrations coefficients are [radians]
+
+        :param matrices: list containing [model_matrix, pupil_mask, flattened_model_matrix]
+        :param N_pix: Number of pixels for Fourier arrays
+        :param crop_pix: Number of pixels to crop the PSF images
+        """
+
+        self.minPix, self.maxPix = (N_pix + 1 - crop_pix) // 2, (N_pix + 1 + crop_pix) // 2
+
+        self.N_coef = matrices[0].shape[-1]     # How many Actuators / Zernike Modes
+        self.model_matrix = matrices[0].copy()
+        self.pupil_mask = matrices[1].copy()
+        self.model_matrix_flat = matrices[2].copy()
+
+        # Calculate the Diversity PhaseMap to use for "defocused" PSF
+        self.diversity_phase = self.define_diversity(diversity_coef)
+
+        # Calculate the FFT peak to normalize the PSF so that it has peak 1.0 for no aberrations
+        self.PEAK = self.peak_PSF()
+
+    def define_diversity(self, coef):
+        """
+        Calculates a wavefront map representing the phase diversity to be added
+        for [nominal -> defocus] PSF calculations
+
+        This can be a random Actuator departure (if coef is a random array)
+        or any combination of Zernike modes (if the model is Zernikes)
+        or the actuator LS fit of whatever Zernike mode
+        :param coef:
+        :return:
+        """
+        _phase = np.dot(self.model_matrix, coef)
+        return _phase
+
+    def peak_PSF(self):
+        """
+        Compute the PEAK of the PSF without aberrations so that we can
+        normalize everything by it
+        """
+        im, strehl = self.compute_PSF(np.zeros(self.N_coef))
+        return strehl
+
+    def compute_PSF(self, coef, diversity=False, crop=True):
+        """
+        Compute the PSF and the Strehl ratio
+        """
+
+        phase = np.dot(self.model_matrix, coef)
+        if diversity:
+            phase += self.diversity_phase
+
+        pupil_function = self.pupil_mask * np.exp(1j * 2*np.pi * phase)
+        image = (np.abs(fftshift(fft2(pupil_function))))**2
+
+        try:
+            image /= self.PEAK
+
+        except AttributeError:
+            # If self.PEAK is not defined, self.compute_PSF will compute the peak
+            pass
+
+        strehl = np.max(image)
+
+        if crop:
+            image = image[self.minPix:self.maxPix, self.minPix:self.maxPix]
+        else:
+            pass
+
+        return image, strehl
+
+    def plot_PSF(self, coef):
+        """
+        Plot an image of the PSF
+        """
+        PSF, strehl = self.compute_PSF(coef)
+
+        plt.figure()
+        plt.imshow(PSF)
+        plt.title('Strehl: %.3f' %strehl)
+        plt.colorbar()
+        plt.clim(vmin=0, vmax=1)

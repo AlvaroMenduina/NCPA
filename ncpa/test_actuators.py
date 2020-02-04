@@ -78,7 +78,7 @@ if __name__ == """__main__""":
     plt.title(r'%d Actuators | Wavefront [$\lambda$]' % N_act)
     # plt.show()
 
-    # Create a random wavefront [Actuator Model]
+    # Create a random wavefront [Zernike Model]
     zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=5, rho_aper=RHO_APER, rho_obsc=RHO_OBSC,
                                                                           N_PIX=N_PIX, radial_oversize=1.0)
     print("Zernike Matrix: ", zernike_matrix.shape)
@@ -98,6 +98,52 @@ if __name__ == """__main__""":
         plt.ylim([-1.1 * RHO_APER, 1.1 * RHO_APER])
         plt.colorbar(image)
     plt.show()
+
+    # ================================================================================================================ #
+    #                                        ~~ Point Spread Function ~~
+    # ================================================================================================================ #
+
+
+    # Define a PSF model using the Actuator Matrices
+    actuator_matrices = [actuator_matrix, pupil_mask, flat_actuator]
+    diversity_actuators = 1/(2*np.pi) * np.random.uniform(-1, 1, size=N_act)
+    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
+                                            crop_pix=50, diversity_coef=diversity_actuators)
+
+    # Show the Diversity Map
+    diversity_map = PSF_actuators.diversity_phase
+    p0 = min(np.min(diversity_map), -np.max(diversity_map))
+    plt.figure()
+    plt.imshow(diversity_map, extent=(-1, 1, -1, 1), cmap='seismic')
+    plt.colorbar()
+    plt.clim(p0, -p0)
+    for c in centers[0]:
+        plt.scatter(c[0], c[1], color='black', s=4)
+    plt.xlim([-1.1*RHO_APER, 1.1*RHO_APER])
+    plt.ylim([-1.1*RHO_APER, 1.1*RHO_APER])
+    plt.title(r'Diversity Wavefront [$\lambda$]')
+    plt.show()
+
+    act_coef = 1/(2*np.pi) * np.random.uniform(-1, 1, size=N_act)
+    psf_img_nom, strehl_nom = PSF_actuators.compute_PSF(act_coef, diversity=False, crop=True)
+    psf_img_foc, strehl_foc = PSF_actuators.compute_PSF(act_coef, diversity=True, crop=True)
+
+    cmap = 'hot'
+    f, (ax1, ax2) = plt.subplots(1, 2)
+    ax1 = plt.subplot(1, 2, 1)
+    img1 = ax1.imshow(psf_img_nom, cmap=cmap)
+    ax1.set_title(r'Nominal PSF (%.2f Strehl)' % strehl_nom)
+    img1.set_clim(0, 1)
+    plt.colorbar(img1, ax=ax1, orientation='horizontal')
+
+    ax2 = plt.subplot(1, 2, 2)
+    img2 = ax2.imshow(psf_img_foc, cmap=cmap)
+    ax2.set_title(r'Diversity PSF (%.2f Strehl)' % strehl_foc)
+    img2.set_clim(0, 1)
+    plt.colorbar(img2, ax=ax2, orientation='horizontal')
+
+    plt.show()
+
 
 
 
