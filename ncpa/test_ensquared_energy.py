@@ -140,7 +140,7 @@ RHO_OBSC = 0.3 * RHO_APER  # Central obscuration (30% of ELT)
 # "up to a certain row" row_by_row == False
 # or whether you want it row_by_row == True
 # This is because low order and high order aberrations behave differently wrt EE
-row_by_row = False
+row_by_row = True
 min_Zernike = 4  # Row number
 max_Zernike = 7
 zernike_triangle = zernike.triangular_numbers(N_levels=max_Zernike)
@@ -183,7 +183,6 @@ if __name__ == """__main__""":
         matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
         PSF_zern = psf.PointSpreadFunction(matrices, N_pix=N_PIX, crop_pix=pix, diversity_coef=np.zeros(N_zern))
 
-        rms_amplitude_new = rms_amplitude * (7/ N_zern)
         ensquared = calculate_ensquared_energy(PSF_zern, wave, N_trials, N_rms, rms_amplitude,
                                                nominal_scale=SPAXEL_MAS, spaxel_scales=spaxel_scales)
 
@@ -201,13 +200,12 @@ if __name__ == """__main__""":
         plt.ylabel(r'Relative Encircled Energy [per cent]')
         plt.legend(title='Spaxel [mas]', loc=3)
         plt.ylim([80, 100])
-        plt.xlim([0, 100])
+        plt.xlim([0, 150])
         plt.title(r'%d Zernike ($\rho^{%d}$) [%.2f $\mu m$]' % (N_zern, zernike_level - 1, wave))
         plt.grid(True)
         # plt.savefig('%d Zernike' % N_zern)
 
-    # Show some examples
-
+    # Show some example
     p0, s0 = PSF_zern.compute_PSF(np.zeros(N_zern))  # Nominal PSF
     # Calculate the EE for the nominal PSF so that you can compare
     EE0 = ensquared_one_pix(p0, pix_scale=SPAXEL_MAS, new_scale=10, plot=True)

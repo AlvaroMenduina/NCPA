@@ -11,7 +11,7 @@ class NoiseEffects(object):
 
         pass
 
-    def add_readout_noise(self, PSF_images, RMS_READ):
+    def add_readout_noise(self, PSF_images, RMS_READ, sigma_offset=5.0):
         """
         Add Readout Noise in the form of additive Gaussian noise
         at a given RMS_READ equal to 1 / SNR, the Signal To Noise ratio
@@ -19,6 +19,7 @@ class NoiseEffects(object):
         Assuming the perfect PSF has a peak of 1.0
         :param PSF_images: datacube of [N_samples, pix, pix, 2] nominal and defocus PSF images
         :param RMS_READ: 1/ SNR
+        :param sigma_offset: add [sigma_offset] * RMS_READ to avoid having negative values
         :return:
         """
 
@@ -29,6 +30,9 @@ class NoiseEffects(object):
             for j in range(N_chan):
                 read_out = np.random.normal(loc=0, scale=RMS_READ, size=(pix, pix))
                 PSF_images_noisy[k, :, :, j] = PSF_images[k, :, :, j] + read_out
+
+        # Add a X Sigma offset to avoid having negative values
+        PSF_images_noisy += sigma_offset * RMS_READ
 
         return PSF_images_noisy
 

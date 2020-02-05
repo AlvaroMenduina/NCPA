@@ -282,6 +282,7 @@ class PointSpreadFunction(object):
         :param crop_pix: Number of pixels to crop the PSF images
         """
 
+        self.crop_pix = crop_pix
         self.minPix, self.maxPix = (N_pix + 1 - crop_pix) // 2, (N_pix + 1 + crop_pix) // 2
 
         self.N_coef = matrices[0].shape[-1]     # How many Actuators / Zernike Modes
