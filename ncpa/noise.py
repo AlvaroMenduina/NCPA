@@ -25,7 +25,7 @@ class NoiseEffects(object):
 
         N_samples, pix, N_chan = PSF_images.shape[0], PSF_images.shape[1], PSF_images.shape[-1]
         PSF_images_noisy = np.zeros_like(PSF_images)
-        print("Adding Readout Noise with RMS: %.3f" % RMS_READ)
+        print("Adding Readout Noise with RMS: %.4f | SNR: %.1f" % (RMS_READ, 1./RMS_READ))
         for k in range(N_samples):
             for j in range(N_chan):
                 read_out = np.random.normal(loc=0, scale=RMS_READ, size=(pix, pix))

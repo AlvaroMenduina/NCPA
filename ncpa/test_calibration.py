@@ -33,7 +33,7 @@ N_actuators = 20                    # Number of actuators in [-1, 1] line
 alpha_pc = 20                       # Height [percent] at the neighbour actuator (Gaussian Model)
 
 # Machine Learning bits
-N_train, N_test = 5000, 500         # Samples for the training of the models
+N_train, N_test = 10000, 1000       # Samples for the training of the models
 coef_strength = 1 / (2 * np.pi)     # Strength of the actuator coefficients
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filers = [256, 128, 32, 8]    # How many filters per layer
@@ -96,8 +96,16 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
 
     # Generate training and test datasets (clean PSF images)
-    train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, N_train, N_test,
-                                                                              coef_strength, rescale=0.35)
+    train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, 100, 100,
+                                                                              coef_strength=0.25, rescale=0.35)
+
+    # Check Defocus / Nominal ratio
+    peaks_nom = np.max(train_PSF[:, :, :, 0], axis=(1, 2))
+    peaks_foc = np.max(train_PSF[:, :, :, 1], axis=(1, 2))
+    plt.figure()
+    plt.plot(peaks_nom)
+    plt.plot(peaks_foc)
+    plt.show()
 
     # Initialize Convolutional Neural Network model for calibration
     calibration_model = calibration.create_cnn_model(layer_filers, kernel_size, input_shape,
@@ -154,6 +162,60 @@ if __name__ == """__main__""":
     img2.set_clim(ph_min, -ph_min)
     plt.colorbar(img2, ax=ax2, orientation='horizontal')
     plt.show()
+
+    # ================================================================================================================ #
+    #      A little bit tidier and more abstract
+    # ================================================================================================================ #
+
+    # In case you need to reload a library after changing it
+    import importlib
+    importlib.reload(calibration)
+
+    # Some Parameters
+    SNR = 500
+    N_train, N_test = 10000, 1000
+    N_loops, epochs_loop = 5, 5
+    readout_copies = 2
+    N_iter = 3
+    layer_filters, kernel_size = [64, 32, 16, 8], 3
+
+
+    # Using the Calibration object from calibration.py
+
+    diversity_actuators = 0.25 * np.random.uniform(-1, 1, size=N_act)
+
+    # Create the PSF model using the Actuator Model for the wavefront
+    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
+                                            crop_pix=pix, diversity_coef=diversity_actuators)
+
+    train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, N_train, N_test,
+                                                                              coef_strength=0.30, rescale=0.35)
+
+    # Check Defocus / Nominal ratio
+    peaks_nom = np.max(train_PSF[:, :, :, 0], axis=(1, 2))
+    peaks_foc = np.max(train_PSF[:, :, :, 1], axis=(1, 2))
+    plt.figure()
+    plt.plot(peaks_nom)
+    plt.plot(peaks_foc)
+
+    # Show some examples from the training set
+    plot_images(train_PSF, N_images=3)
+    plt.show()
+
+    calib = calibration.Calibration(PSF_model=PSF_actuators)
+    calib.create_cnn_model(layer_filers, kernel_size, name='CALIBR', activation='relu')
+    losses = calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                           N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                           readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+    RMS_evolution = calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
+                                               readout_noise=True, RMS_readout=1./SNR)
+
+    calib.plot_RMS_evolution(RMS_evolution)
+    plt.show()
+
+
+
 
 
 

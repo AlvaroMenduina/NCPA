@@ -123,6 +123,7 @@ class Calibration(object):
         train_batches = [dataset[i * N_train:(i + 1) * N_train] for i in range(N_batches)]
         coef_batches = [coefs[i * N_train:(i + 1) * N_train] for i in range(N_batches)]
         test_images, test_coefs = dataset[N_batches * N_train:], coefs[N_batches * N_train:]
+        print("Splitting into %d batches of %d images" % (N_batches, N_train))
         print("Finished")
         return train_batches, coef_batches, test_images, test_coefs
 
@@ -151,7 +152,7 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def create_cnn_model(self, layer_filers, kernel_size, name, activation='relu'):
+    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu'):
         """
         Creates a CNN model for NCPA calibration
         :return:
@@ -160,9 +161,9 @@ class Calibration(object):
         input_shape = (pix, pix, 2,)        # Multiple Wavelength Channels
         model = Sequential()
         model.name = name
-        model.add(Conv2D(layer_filers[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
+        model.add(Conv2D(layer_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
                          activation=activation, input_shape=input_shape))
-        for N_filters in layer_filers[1:]:
+        for N_filters in layer_filters[1:]:
             model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
 
         model.add(Flatten())
@@ -183,15 +184,56 @@ class Calibration(object):
         :return:
         """
         guess_coef = self.cnn_model.predict(test_images)
-        residual = test_coefs + guess_coef
+        residual = test_coefs - guess_coef
         norm_coefs = norm(test_coefs, axis=1)
         norm_residual = norm(residual, axis=1)
         ratio = np.mean(norm_residual / norm_coefs) * 100
         return ratio
 
-    def train_calibration_model(self, images_batches, coefs_batches, test_images, test_coefs,
-                                N_loops=10, epochs_loop=50, verbose=1, plot_val_loss=False,
-                                readout_noise=False, RMS_readout=[1. / 100]):
+    def train_calibration_model(self, train_images, train_coefs, test_images, test_coefs,
+                                N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                readout_noise=False, RMS_readout=[1. / 100], readout_copies=3):
+
+        loss, val_loss = [], []
+        print("\nTraining the Calibration Model")
+        for i_times in range(N_loops):  # Loop over all images N_loops times
+            print("\nIteration %d / %d" % (i_times + 1, N_loops))
+            if readout_noise is True:
+                i_noise = np.random.choice(range(len(RMS_readout)))  # Randomly select the RMS Readout
+                train, coef = [], []
+                for k in range(readout_copies):  # Get multiple random copies
+                    _train_images = self.noise_effects.add_readout_noise(train_images, RMS_READ=RMS_readout[i_noise])
+                    train.append(_train_images)
+                    coef.append(train_coefs)
+                train_noisy_images = np.concatenate(train, axis=0)
+                train_noisy_coefs = np.concatenate(coef, axis=0)
+                test_noisy_images = self.noise_effects.add_readout_noise(test_images, RMS_READ=RMS_readout[i_noise])
+            else:
+                train_noisy_images = train_images
+                train_noisy_coefs = train_coefs
+                test_noisy_images = test_images
+
+
+            train_history = self.cnn_model.fit(x=train_noisy_images, y=train_noisy_coefs,
+                                               validation_data=(test_noisy_images, test_coefs),
+                                               epochs=epochs_loop, batch_size=batch_size_keras,
+                                               shuffle=True, verbose=verbose)
+
+            loss.extend(train_history.history['loss'])
+            val_loss.append(self.validation_loss(test_noisy_images, test_coefs))
+
+        if plot_val_loss:
+            plt.figure()
+            plt.plot(val_loss)
+            plt.xlabel('Epoch')
+            plt.ylabel('Validation Loss')
+
+        return loss, val_loss
+
+
+    def train_calibration_model_batches(self, images_batches, coefs_batches, test_images, test_coefs,
+                                N_loops=10, epochs_loop=50, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                readout_noise=False, RMS_readout=[1. / 100], readout_copies=3):
 
         """
         Train a CNN calibration model to estimate the aberrations from PSF images
@@ -233,13 +275,19 @@ class Calibration(object):
 
                 if readout_noise is True:
                     i_noise = np.random.choice(range(len(RMS_readout)))  # Randomly select the RMS Readout
-                    train_images = self.noise_effects.add_readout_noise(train_images, RMS_READ=RMS_readout[i_noise])
+                    train, coef = [], []
+                    for k in range(readout_copies):     # Get multiple random copies
+                        _train_images = self.noise_effects.add_readout_noise(train_images, RMS_READ=RMS_readout[i_noise])
+                        train.append(_train_images)
+                        coef.append(train_coefs)
+                    train_images = np.concatenate(train, axis=0)
+                    train_coefs = np.concatenate(coef, axis=0)
                     test_images = self.noise_effects.add_readout_noise(test_images, RMS_READ=RMS_readout[i_noise])
 
                 # Allergen Notice: At this point clean_images may contain noise
                 train_history = self.cnn_model.fit(x=train_images, y=train_coefs,
                                                    validation_data=(test_images, test_coefs),
-                                                   epochs=epochs_loop, batch_size=N_train,
+                                                   epochs=epochs_loop, batch_size=batch_size_keras,
                                                    shuffle=True, verbose=verbose)
                 loss.extend(train_history.history['loss'])
                 val_loss.append(self.validation_loss(test_images, test_coefs))
@@ -265,8 +313,8 @@ class Calibration(object):
         print("\nCalculating RMS before / after for %d samples" % N_samples)
         RMS0, RMS = [], []
         for k in range(N_samples):
-            wavef_before = wavelength * 1e3 * np.dot(self.PSF_model.RBF_flat, coef_before[k])
-            wavef_after = wavelength * 1e3 * np.dot(self.PSF_model.RBF_flat, coef_after[k])
+            wavef_before = wavelength * 1e3 * np.dot(self.PSF_model.model_matrix_flat, coef_before[k])
+            wavef_after = wavelength * 1e3 * np.dot(self.PSF_model.model_matrix_flat, coef_after[k])
             RMS0.append(np.std(wavef_before))
             RMS.append(np.std(wavef_after))
         mu0, mu = np.mean(RMS0), np.mean(RMS)
