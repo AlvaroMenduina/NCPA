@@ -1,6 +1,38 @@
 import numpy as np
 
 from itertools import tee
+from pyfiglet import Figlet
+from datetime import date
+
+
+def print_title(message='N C P A', font=None, random_font=False):
+
+    nice_fonts_list = ['lean', 'slant', 'alligator', 'alligator2',
+                       'c1______', 'colossal', 'utopiab', 'mayhem_d']
+
+    # Check the day of the week
+    today = date.today()
+    day = int(today.strftime("%d"))
+
+    if font is not None:
+        custom_fig = Figlet(font=font)
+        print(custom_fig.renderText(message))
+
+    else:
+
+        if random_font is False:
+            # Randomly select the font according to day
+            i_font = day % len(nice_fonts_list) - 1
+            custom_fig = Figlet(font=nice_fonts_list[i_font])
+            print(custom_fig.renderText(message))
+        else:
+            custom_fig = Figlet()
+            all_fonts = custom_fig.getFonts()
+            i_font = np.random.choice(len(all_fonts))
+            print(all_fonts[i_font])
+            custom_fig = Figlet(font=all_fonts[i_font])
+            print(custom_fig.renderText(message))
+    return
 
 def pairwise(iterable):
     """s -> (s0,s1), (s1,s2), (s2, s3), ..."""
