@@ -237,9 +237,12 @@ def show_wavefronts_grid(PSF_model, coefs, rho_aper,
         plt.title(title)
     plt.grid(False)
     imag = ax.imshow(display_grid, aspect='equal', cmap=cmap)
+    cmin = min(np.min(display_grid), -np.max(display_grid))
+    imag.set_clim(cmin, -cmin)
     ax.get_xaxis().set_visible(False)
     ax.get_yaxis().set_visible(False)
     plt.colorbar(imag, orientation='horizontal')
+
 
     return
 

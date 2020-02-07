@@ -70,6 +70,48 @@ def generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale=0.35):
 
     return dataset[:N_train], coefs[:N_train], dataset[N_train:], coefs[N_train:]
 
+def robust_diversity(PSF_model, N_train, N_test, coef_strength, rescale=0.35, diversity_error=0.10, N_copies=5):
+    """
+    Generates datasets to train a model to be robust against Diversity uncertainties
+
+    We cover an interval of +- X % of diversity errors
+    For each copy we generate a training set with a different diversity wavefront
+    That way we hope to train the model to be robust against uncertainties
+
+    :param PSF_model:
+    :param N_train:
+    :param N_test:
+    :param coef_strength:
+    :param rescale:
+    :param diversity_error:
+    :return:
+    """
+
+    diversity_copy = PSF_model.diversity_phase.copy()
+
+    train_PSF, train_coef, test_PSF, test_coef = [], [], [], []
+    diversities = np.linspace(-diversity_error, diversity_error, N_copies, endpoint=True)
+    print("\nRobust Training || Diversity Errors")
+    print("Generating %d copies of the datasets" % N_copies)
+    print("Ranging from -%.1f to +%.1f per cent Diversity Error" % (100*diversity_error, 100 * diversity_error))
+    for i, div in enumerate(diversities):
+        print("Copy #%d/%d" % (i+1, N_copies))
+
+        PSF_model.diversity_phase = (1 + div) * diversity_copy          # modify the diversity
+        _train_PSF, _train_coef, _test_PSF, _test_coef = generate_dataset(PSF_model, N_train, N_test,
+                                                                          coef_strength, rescale)
+        train_PSF.append(_train_PSF)
+        train_coef.append(_train_coef)
+        test_PSF.append(_test_PSF)
+        test_coef.append(_test_coef)
+
+    train_PSF = np.concatenate(train_PSF, axis=0)
+    train_coef = np.concatenate(train_coef, axis=0)
+    test_PSF = np.concatenate(test_PSF, axis=0)
+    test_coef = np.concatenate(test_coef, axis=0)
+
+    return train_PSF, train_coef, test_PSF, test_coef
+
 
 class Calibration(object):
 
