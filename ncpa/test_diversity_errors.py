@@ -37,7 +37,7 @@ N_actuators = 20                    # Number of actuators in [-1, 1] line
 alpha_pc = 10                       # Height [percent] at the neighbour actuator (Gaussian Model)
 
 # Machine Learning bits
-N_train, N_test = 5000, 1000       # Samples for the training of the models
+N_train, N_test = 10000, 1000       # Samples for the training of the models
 coef_strength = 0.30                # Strength of the actuator coefficients
 diversity = 0.55                    # Strength of extra diversity commands
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
@@ -98,7 +98,7 @@ if __name__ == """__main__""":
     train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, N_train, N_test,
                                                                               coef_strength, rescale)
     utils.plot_images(train_PSF)
-    plt.show()
+    # plt.show()
 
     # Train the Calibration Model on images with the nominal defocus
     calib = calibration.Calibration(PSF_model=PSF_actuators)
