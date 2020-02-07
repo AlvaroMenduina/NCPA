@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 from itertools import tee
 from pyfiglet import Figlet
@@ -124,3 +125,121 @@ def crop_array(array, crop):
         array_crop = array[:, min_crop:max_crop, min_crop:max_crop, :]
 
     return array_crop
+
+
+def plot_images(PSF_datacube, N_images=5):
+    """
+    Plots a given number of PSF images
+    :param PSF_datacube:
+    :param N_images:
+    :return:
+    """
+
+    for i in range(N_images):
+
+        cmap = 'hot'
+        f, (ax1, ax2) = plt.subplots(1, 2)
+        ax1 = plt.subplot(1, 2, 1)
+        img1 = ax1.imshow(PSF_datacube[i, :, :, 0], cmap=cmap)
+        ax1.set_title(r'Nominal PSF')
+        # img1.set_clim(0, 1)
+        plt.colorbar(img1, ax=ax1, orientation='horizontal')
+
+        ax2 = plt.subplot(1, 2, 2)
+        img2 = ax2.imshow(PSF_datacube[i, :, :, 1], cmap=cmap)
+        ax2.set_title(r'Diversity PSF')
+        # img2.set_clim(0, 1)
+        plt.colorbar(img2, ax=ax2, orientation='horizontal')
+
+def plot_actuator_commands(commands, centers, rho_aper, PIX, cmap='Reds', delta0=4, min_val=0.9):
+
+    cent, delta = centers
+    x = np.linspace(-1.25*rho_aper, 1.25*rho_aper, PIX, endpoint=True)
+    xx, yy = np.meshgrid(x, x)
+    image = np.zeros((PIX, PIX))
+    for i, (xc, yc) in enumerate(cent):
+        act_mask = (xx - xc)**2 + (yy - yc)**2 <= (delta/delta0)**2
+        image += commands[i] * act_mask
+    plt.figure()
+    plt.imshow(image, cmap=cmap)
+    plt.colorbar()
+    plt.clim(min_val*image[np.nonzero(image)].min(), image.max())
+    plt.title(r'Residual Error Command')
+
+    return
+
+def show_wavefronts(PSF_model, coefs, rho_aper, images=(2, 3), cmap='jet'):
+    """
+    Show examples of wavefronts
+
+    :param PSF_model: PSF model to compute the wavefront (can be Zernike or Actuators)
+    :param coefs: coefficients of the wavefront
+    :param rho_aper: aperture radius relative to [-1, 1] line. Used to clip the images
+    :param images: (n_rows, n_columns)
+    :param cmap: colormap
+    :return:
+    """
+    n_rows, n_cols = images
+    f, (axes) = plt.subplots(n_rows, n_cols)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            k = n_cols * i + j
+            print(k)
+            ax = axes[i][j]
+
+            wavefront = np.dot(PSF_model.model_matrix, coefs[k])
+            cmin = min(np.min(wavefront), -np.max(wavefront))
+
+            img = ax.imshow(wavefront, cmap=cmap, extent=[-1, 1, -1, 1])
+            ax.set_title('Wavefront [waves]')
+            ax.set_xlim([-1.1 * rho_aper, 1.1 * rho_aper])
+            ax.set_ylim([-1.1 * rho_aper, 1.1 * rho_aper])
+            ax.get_xaxis().set_visible(False)
+            ax.get_yaxis().set_visible(False)
+            img.set_clim(cmin, -cmin)
+            plt.colorbar(img, ax=ax, orientation='horizontal')
+
+    return
+
+
+def show_wavefronts_grid(PSF_model, coefs, rho_aper,
+                         images=(2, 4), cmap='jet', title=None):
+    """
+    Variation on "show_wavefront". Instead of creating a subplot for each image,
+    this code combines all wavefront maps into a single image
+    This helps avoid having multiple subtitles, colorbars, etc
+
+    :param PSF_model: PSF model to compute the wavefront (can be Zernike or Actuators)
+    :param coefs: coefficients of the wavefront
+    :param rho_aper: aperture radius relative to [-1, 1] line. Used to clip the images
+    :param images: (n_rows, n_columns)
+    :param cmap: colormap
+    :param title: str containing a customized title
+    :return:
+    """
+    PIX = PSF_model.model_matrix.shape[0]
+    size = int(PIX * 1.1*rho_aper)
+    minpix = (PIX + 1 - size) // 2
+    maxpix = (PIX + 1 + size) // 2
+    n_rows, n_cols = images
+    display_grid = np.zeros((size * n_rows, n_cols * size))
+    for i in range(n_rows):
+        for j in range(n_cols):
+            k = n_cols * i + j
+            wavefront = np.dot(PSF_model.model_matrix, coefs[k])
+            crop_wavefront = wavefront[minpix:maxpix, minpix:maxpix]
+            display_grid[i * size: (i + 1) * size, j * size: (j + 1) * size] = crop_wavefront
+
+    fig, ax = plt.subplots()
+    if title is None:
+        plt.title(r'Wavefront [waves]')
+    else:
+        plt.title(title)
+    plt.grid(False)
+    imag = ax.imshow(display_grid, aspect='equal', cmap=cmap)
+    ax.get_xaxis().set_visible(False)
+    ax.get_yaxis().set_visible(False)
+    plt.colorbar(imag, orientation='horizontal')
+
+    return
+

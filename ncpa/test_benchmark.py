@@ -274,7 +274,7 @@ if __name__ == """__main__""":
 
     plt.show()
 
-    diversity_strengths = np.linspace(0.10, 1.0, 20, endpoint=True)
+    diversity_strengths = np.linspace(0.1, 1.0, 20, endpoint=True)
     PV = 2 * diversity_strengths
     RMS_divs = []
     mus_div, std_div = [], []
@@ -338,11 +338,9 @@ if __name__ == """__main__""":
 
     plt.figure()
     plt.errorbar(PV, y=mus_div, yerr=std_div)
-    plt.xlabel(r'PV Diversity [waves]')
+    plt.xlabel(r'PV Diversity [rad]')
     plt.ylabel(r'RMS after calibration [nm]')
     plt.show()
-
-
 
     # ================================================================================================================ #
     #      TEST #4 - Does the Actuator Crosstalk (Alpha %) matter?

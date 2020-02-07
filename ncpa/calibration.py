@@ -360,7 +360,9 @@ class Calibration(object):
             if readout_noise is True:
                 images_before = self.noise_effects.add_readout_noise(images_before, RMS_READ=RMS_readout)
 
-        return RMS_evolution
+        final_residuals = coefs_after
+
+        return RMS_evolution, final_residuals
 
     def plot_RMS_evolution(self, RMS_evolution):
         """

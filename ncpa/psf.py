@@ -291,7 +291,7 @@ class PointSpreadFunction(object):
         self.model_matrix_flat = matrices[2].copy()
 
         # Calculate the Diversity PhaseMap to use for "defocused" PSF
-        self.diversity_phase = self.define_diversity(diversity_coef)
+        self.define_diversity(diversity_coef)
 
         # Calculate the FFT peak to normalize the PSF so that it has peak 1.0 for no aberrations
         self.PEAK = self.peak_PSF()
@@ -307,8 +307,8 @@ class PointSpreadFunction(object):
         :param coef:
         :return:
         """
-        _phase = np.dot(self.model_matrix, coef)
-        return _phase
+        self.diversity_phase = np.dot(self.model_matrix, coef)
+        return
 
     def peak_PSF(self):
         """

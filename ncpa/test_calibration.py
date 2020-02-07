@@ -41,30 +41,6 @@ kernel_size = 3
 input_shape = (pix, pix, 2,)
 epochs = 50                         # Training epochs
 
-def plot_images(PSF_datacube, N_images=5):
-    """
-    Plots a given number of PSF images
-    :param PSF_datacube:
-    :param N_images:
-    :return:
-    """
-
-    for i in range(N_images):
-
-        cmap = 'hot'
-        f, (ax1, ax2) = plt.subplots(1, 2)
-        ax1 = plt.subplot(1, 2, 1)
-        img1 = ax1.imshow(PSF_datacube[i, :, :, 0], cmap=cmap)
-        ax1.set_title(r'Nominal PSF')
-        # img1.set_clim(0, 1)
-        plt.colorbar(img1, ax=ax1, orientation='horizontal')
-
-        ax2 = plt.subplot(1, 2, 2)
-        img2 = ax2.imshow(PSF_datacube[i, :, :, 1], cmap=cmap)
-        ax2.set_title(r'Diversity PSF')
-        # img2.set_clim(0, 1)
-        plt.colorbar(img2, ax=ax2, orientation='horizontal')
-
 
 if __name__ == """__main__""":
 
@@ -118,7 +94,7 @@ if __name__ == """__main__""":
     test_PSF_readout = noise_model.add_readout_noise(test_PSF, RMS_READ=1./SNR_READOUT)
 
     # Show some examples from the training set
-    plot_images(train_PSF_readout, N_images=3)
+    utils.plot_images(train_PSF_readout, N_images=3)
     plt.show()
 
     # Train the calibration model
@@ -199,7 +175,7 @@ if __name__ == """__main__""":
     plt.plot(peaks_foc)
 
     # Show some examples from the training set
-    plot_images(train_PSF, N_images=3)
+    utils.plot_images(train_PSF, N_images=3)
     plt.show()
 
     calib = calibration.Calibration(PSF_model=PSF_actuators)
