@@ -240,9 +240,9 @@ if __name__ == """__main__""":
         mus_div_rob.append(avg)
         std_div_rob.append(std)
 
-    ## FIX
-    mus_div_rob = [x for x in mus_div_rob[::2]]
-    std_div_rob = [x for x in mus_div_rob[1::2]]
+    # ## FIX
+    # mus_div_rob = [x for x in mus_div_rob[::2]]
+    # std_div_rob = [x for x in mus_div_rob[1::2]]
 
     plt.figure()
     plt.errorbar(100*delta_divs, mus_div, std_div, fmt='o', label='Nomimal')
