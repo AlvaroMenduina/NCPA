@@ -243,6 +243,5 @@ def show_wavefronts_grid(PSF_model, coefs, rho_aper,
     ax.get_yaxis().set_visible(False)
     plt.colorbar(imag, orientation='horizontal')
 
-
     return
 

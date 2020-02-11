@@ -110,6 +110,9 @@ def robust_diversity(PSF_model, N_train, N_test, coef_strength, rescale=0.35, di
     test_PSF = np.concatenate(test_PSF, axis=0)
     test_coef = np.concatenate(test_coef, axis=0)
 
+    # Watch out, we need to go back to the previous diversity
+    PSF_model.diversity_phase = diversity_copy
+
     return train_PSF, train_coef, test_PSF, test_coef
 
 
