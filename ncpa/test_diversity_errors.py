@@ -228,13 +228,13 @@ if __name__ == """__main__""":
 
         # Create a contaminated dataset for testing
         _PSF, _coef, test_PSF_uncertain, test_coef_uncertain = calibration.generate_dataset(PSF_actuators, N_train=1,
-                                                                                            N_test=1000,
+                                                                                            N_test=500,
                                                                                             coef_strength=coef_strength,
                                                                                             rescale=rescale)
 
         # Let's see how that affects the performance
         RMS_evolution_robust, final_residual = robust_calib.calibrate_iterations(test_PSF_uncertain, test_coef_uncertain,
-                                                                             wavelength=WAVE, N_iter=4,
+                                                                             wavelength=WAVE, N_iter=N_iter,
                                                                              readout_noise=True, RMS_readout=1./SNR)
         deltaPV = delta * PV0
         title = r'$\Delta$ PV Diversity %.2f [$\lambda$] || Wavefronts [$\lambda$]' % deltaPV
@@ -262,6 +262,11 @@ if __name__ == """__main__""":
     plt.xlabel(r'Diversity Variations [per cent]')
     plt.ylabel(r'RMS after calibration [nm]')
     plt.show()
+
+    # Show some examples
+    calib.plot_RMS_evolution(RMS_evolution)
+    robust_calib.plot_RMS_evolution(RMS_evolution_robust)
+
 
     # ================================================================================================================ #
     #                                           ZERNIKE Polynomials
@@ -302,7 +307,7 @@ if __name__ == """__main__""":
                                                          readout_noise=True, RMS_readout=1./SNR)
 
     calib_zern.plot_RMS_evolution(RMS_evolution_zern)
-    plt.show()
+    # plt.show()
 
     delta_divs = np.linspace(-0.10, 0.10, 11, endpoint=True)
     PV_uncertain = PV0 * (1 + delta_divs) * diversity
@@ -407,7 +412,7 @@ if __name__ == """__main__""":
         # Let's see how that affects the performance
         RMS_evolution_zernike, zernike_residual = robust_calib_zernike.calibrate_iterations(test_PSF_uncertain,
                                                                                   test_coef_uncertain,
-                                                                                  wavelength=WAVE, N_iter=4,
+                                                                                  wavelength=WAVE, N_iter=N_iter,
                                                                                   readout_noise=True,
                                                                                   RMS_readout=1. / SNR)
         # deltaPV = delta * PV0

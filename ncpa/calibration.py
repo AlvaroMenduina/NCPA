@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import os
 
 
 from keras.layers import Dense, Conv2D, Flatten
@@ -29,6 +30,38 @@ def create_cnn_model(layer_filers, kernel_size, input_shape, N_classes, name, ac
     model.compile(optimizer='adam', loss='mean_squared_error')
 
     return model
+
+def generate_dataset_and_save(PSF_model, N_train, N_test, coef_strength, rescale, dir_to_save):
+
+
+    # Check whether the directory already exists
+    if not os.path.exists(dir_to_save):
+        print("Creating New Directory")
+        os.makedirs(dir_to_save)
+    else:
+        print("Directory Already Exists")
+
+    train_PSF, train_coef, test_PSF, test_coef = generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale)
+
+    print("Saving Datasets in: ")
+    for dataset, file_name in zip([train_PSF, train_coef, test_PSF, test_coef],
+                                  ["train_PSF", "train_coef", "test_PSF", "test_coef"]):
+
+        name_str = os.path.join(dir_to_save, file_name)
+        print(name_str + '.npy')
+        np.save(name_str, dataset)
+
+    return train_PSF, train_coef, test_PSF, test_coef
+
+def load_datasets(dir_to_load, file_names):
+
+    datasets = []
+    for file in file_names:
+
+        data = np.load(os.path.join(dir_to_load, file + '.npy'))
+        datasets.append(data)
+
+    return datasets
 
 
 def generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale=0.35):
