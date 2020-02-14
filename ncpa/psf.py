@@ -357,3 +357,108 @@ class PointSpreadFunction(object):
         plt.title('Strehl: %.3f' %strehl)
         plt.colorbar()
         plt.clim(vmin=0, vmax=1)
+
+
+class PointSpreadFunctionMultiwave(object):
+    """
+    Multiwavelength equivalent of PointSpreadFunction
+    """
+
+    def __init__(self, matrices, N_waves, wave0, waveN, wave_ref, N_pix, crop_pix, diversity_coef):
+        """
+        This class is independent of the Wavefront model, it works for both Actuator Model and Zernike
+
+        Units for aberrations coefficients are [radians]
+
+        :param matrices: list containing [model_matrix, pupil_mask, flattened_model_matrix] for each wavelength
+        :param N_pix: Number of pixels for Fourier arrays
+        :param crop_pix: Number of pixels to crop the PSF images
+        """
+
+        self.crop_pix = crop_pix
+        self.minPix, self.maxPix = (N_pix + 1 - crop_pix) // 2, (N_pix + 1 + crop_pix) // 2
+
+        self.N_coef = matrices[0][0].shape[-1]     # How many Actuators / Zernike Modes
+        self.model_matrices = [array[0].copy() for array in matrices]
+        self.pupil_masks = [array[1].copy() for array in matrices]
+        self.model_matrices_flat = [array[0].copy() for array in matrices]
+
+        # Wavelength information
+        self.wavelengths = np.linspace(wave0, waveN, N_waves, endpoint=True)
+        self.wave_ratios = self.wavelengths / wave_ref
+        self.N_waves = N_waves
+
+        # Calculate the Diversity PhaseMap to use for "defocused" PSF
+        self.define_diversity(diversity_coef)
+
+        # Calculate the FFT peak to normalize the PSF so that it has peak 1.0 for no aberrations
+        self.PEAKS = self.peak_PSF()
+
+    def peak_PSF(self):
+        """
+        Compute the PEAK of the PSF without aberrations so that we can
+        normalize everything by it
+        """
+        PEAKS = []
+        for k in range(self.N_waves):
+            im, strehl = self.compute_PSF(np.zeros(self.N_coef), wave_idx=k)
+            PEAKS.append(strehl)
+        return PEAKS
+
+    def define_diversity(self, coef):
+        """
+        Calculates a wavefront map representing the phase diversity to be added
+        for [nominal -> defocus] PSF calculations
+
+        This can be a random Actuator departure (if coef is a random array)
+        or any combination of Zernike modes (if the model is Zernikes)
+        or the actuator LS fit of whatever Zernike mode
+        :param coef:
+        :return:
+        """
+        self.diversity_phase = [np.dot(matrix, coef) for matrix in self.model_matrices]
+        return
+
+    def compute_PSF(self, coef, wave_idx, diversity=False, crop=True):
+        """
+        Compute the PSF and the Strehl ratio
+        for a given wavelength
+        """
+
+        # Remember to rescale the coefficients by the wavelength ratios
+        coef /= self.wave_ratios[wave_idx]
+
+        phase = np.dot(self.model_matrices[wave_idx], coef)
+        if diversity:
+            phase += self.diversity_phase[wave_idx]
+
+        pupil_function = self.pupil_masks[wave_idx] * np.exp(1j * 2*np.pi * phase)
+        image = (np.abs(fftshift(fft2(pupil_function))))**2
+
+        try:
+            image /= self.PEAKS[wave_idx]
+
+        except AttributeError:
+            # If self.PEAK is not defined, self.compute_PSF will compute the peak
+            pass
+
+        strehl = np.max(image)
+
+        if crop:
+            image = image[self.minPix:self.maxPix, self.minPix:self.maxPix]
+        else:
+            pass
+
+        return image, strehl
+
+    def plot_PSF(self, coef, wave_idx, cmap='hot'):
+        """
+        Plot an image of the PSF
+        """
+        PSF, strehl = self.compute_PSF(coef, wave_idx)
+
+        plt.figure()
+        plt.imshow(PSF, cmap=cmap)
+        plt.title('Strehl: %.3f' %strehl)
+        plt.colorbar()
+        plt.clim(vmin=0, vmax=1)

@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import os
-
+from time import time
 
 from keras.layers import Dense, Conv2D, Flatten
 from keras.models import Sequential
@@ -75,11 +75,18 @@ def generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale=0.35):
     :return:
     """
 
+    # Check whether PSF_model is single wavelength or multiwave
+    try:
+        N_waves = PSF_model.N_waves
+        print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+    except AttributeError:
+        N_waves = 1
+
     N_coef = PSF_model.N_coef
     pix = PSF_model.crop_pix
     N_samples = N_train + N_test
 
-    dataset = np.empty((N_samples, pix, pix, 2))
+    dataset = np.empty((N_samples, pix, pix, 2 * N_waves))
     coefs = coef_strength * np.random.uniform(low=-1, high=1, size=(N_samples, N_coef))
 
     # Rescale the coefficients to cover a wider range of RMS (so we can iterate)
@@ -89,17 +96,34 @@ def generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale=0.35):
     coefs *= rescale_coef[:, np.newaxis]
 
     print("\nGenerating datasets: %d PSF images" % N_samples)
+    if N_waves == 1:
+        for i in range(N_samples):
 
-    for i in range(N_samples):
+            im0, _s = PSF_model.compute_PSF(coefs[i])
+            dataset[i, :, :, 0] = im0
 
-        im0, _s = PSF_model.compute_PSF(coefs[i])
-        dataset[i, :, :, 0] = im0
+            im_foc, _s = PSF_model.compute_PSF(coefs[i], diversity=True)
+            dataset[i, :, :, 1] = im_foc
 
-        im_foc, _s = PSF_model.compute_PSF(coefs[i], diversity=True)
-        dataset[i, :, :, 1] = im_foc
+            if i % 500 == 0:
+                print(i)
 
-        if i % 500 == 0:
-            print(i)
+    else:   # MULTIWAVELENGTH    # This can take a long time
+        start = time()
+        for i in range(N_samples):
+            for wave_idx in range(N_waves):
+                im0, _s = PSF_model.compute_PSF(coefs[i], wave_idx=wave_idx)
+                dataset[i, :, :, 2*wave_idx] = im0
+
+                im_foc, _s = PSF_model.compute_PSF(coefs[i], wave_idx=wave_idx, diversity=True)
+                dataset[i, :, :, 2*wave_idx + 1] = im_foc
+
+            if i % 100 == 0:
+                delta_time = time() - start
+                estimated_total = delta_time * N_samples / i
+                remaining = estimated_total - delta_time
+                message = "%d | t=%.1f sec | ETA: %.1f sec (%.1f min)" % (i, delta_time, remaining, remaining / 60)
+                print(message)
 
     return dataset[:N_train], coefs[:N_train], dataset[N_train:], coefs[N_train:]
 
@@ -442,7 +466,8 @@ class Calibration(object):
 
         return RMS_evolution, final_residuals
 
-    def plot_RMS_evolution(self, RMS_evolution):
+    @staticmethod
+    def plot_RMS_evolution(RMS_evolution):
         """
         Plot the evolution of RMS wavefront with calibration iterations
         :param RMS_evolution: list of pairs of RMS [(BEFORE, AFTER)_0, ..., (BEFORE, AFTER)_N]
