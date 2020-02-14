@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -41,6 +42,15 @@ def pairwise(iterable):
     next(b, None)
     return zip(a, b)
 
+
+def list_files_in_directory(directory):
+
+    onlyfiles = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    return onlyfiles
+
+def find_substring(list, substring):
+    match = [name for name in list if substring in name]
+    return match
 
 ELT_DIAM = 39
 MILIARCSECS_IN_A_RAD = 206265000
