@@ -259,8 +259,17 @@ class Calibration(object):
         Creates a CNN model for NCPA calibration
         :return:
         """
+
+        # Check whether PSF_model is single wavelength or multiwave
+        try:
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+        except AttributeError:
+            N_waves = 1
+
+
         pix = self.PSF_model.crop_pix
-        input_shape = (pix, pix, 2,)        # Multiple Wavelength Channels
+        input_shape = (pix, pix, 2 * N_waves,)        # Multiple Wavelength Channels
         model = Sequential()
         model.name = name
         model.add(Conv2D(layer_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
@@ -491,6 +500,85 @@ class Calibration(object):
         plt.ylabel(r'RMS wavefront AFTER [nm]')
 
 
+class CalibrationEnsemble(Calibration):
+
+    """
+    Class Inheritance for Calibration Object
+    It allows us to train an Ensemble of Calibration models on the same dataset
+    """
+
+    def generate_ensemble_models(self, N_models, layer_filters, kernel_size, name, activation='relu'):
+
+        self.ensemble_models = []
+        for k in range(N_models):
+            new_name = name + '_%d' % (k + 1)
+            self.create_cnn_model(layer_filters, kernel_size, new_name, activation)
+            self.ensemble_models.append(self.cnn_model)
+        del self.cnn_model
+
+    def train_ensemble_models(self, train_images, train_coefs, test_images, test_coefs,
+                                N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                readout_noise=False, RMS_readout=[1. / 100], readout_copies=3):
+
+        for _model in self.ensemble_models:
+            self.cnn_model = _model
+            print("\nTraining Ensemble Model | ", _model.name)
+            _loss = self.train_calibration_model(train_images, train_coefs, test_images, test_coefs,
+                                N_loops, epochs_loop, verbose, batch_size_keras, plot_val_loss,
+                                readout_noise, RMS_readout, readout_copies)
+
+    def average_predictions(self, images):
+
+        _predictions = []
+        for _model in self.ensemble_models:
+            _predictions.append(_model.predict(images))
+        _predictions = np.stack(_predictions)
+
+        return np.mean(_predictions, axis=0)
+
+    def calibrate_iterations_ensemble(self, test_images, test_coefs, wavelength, N_iter=3,
+                                      readout_noise=False, RMS_readout=1./100):
+
+        """
+        Modified self.calibrate_iterations to account for the existence of multiple Ensemble Models
+        :param test_images: datacube of test PSF images ("clean")
+        :param test_coefs: datacube of test coefficients ("clean")
+        :param N_iter: how many iterations to run
+        :param readout_noise: whether to add READOUT NOISE
+        :param RMS_readout: how much READOUT NOISE to add, RMS 1/SNR
+        :return:
+        """
+        if readout_noise is True:
+            images_before = self.noise_effects.add_readout_noise(test_images, RMS_READ=RMS_readout)
+        else:
+            images_before = test_images
+
+        coefs_before = test_coefs
+        RMS_evolution = []
+        for k in range(N_iter):
+            print("\nNCPA Calibration | Iteration %d/%d" % (k + 1, N_iter))
+
+            #### This is the bit we are overriding!
+            predicted_coefs = self.average_predictions(images_before)
+            ####
+
+            coefs_after = coefs_before - predicted_coefs
+            rms_before, rms_after = self.calculate_RMS(coefs_before, coefs_after, wavelength)
+            rms_pair = [rms_before, rms_after]
+            RMS_evolution.append(rms_pair)
+
+            if k == N_iter - 1:
+                break
+            # Update the PSF and coefs
+            images_before = self.update_PSF(coefs_after)
+            coefs_before = coefs_after
+
+            if readout_noise is True:
+                images_before = self.noise_effects.add_readout_noise(images_before, RMS_READ=RMS_readout)
+
+        final_residuals = coefs_after
+
+        return RMS_evolution, final_residuals
 
 
 

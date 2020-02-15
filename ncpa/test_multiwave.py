@@ -161,5 +161,35 @@ if __name__ == """__main__""":
     train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSFs, N_train, N_test,
                                                                               coef_strength, rescale)
 
+    directory = os.path.join(os.getcwd(), 'Multiwave')
+    np.save(os.path.join(directory, 'train_PSF'), train_PSF)
+    np.save(os.path.join(directory, 'train_coef'), train_coef)
+    np.save(os.path.join(directory, 'test_PSF'), test_PSF)
+    np.save(os.path.join(directory, 'test_coef'), test_coef)
+
+    def show_PSF_multiwave(array, images=5, cmap='hot'):
+        N_waves = array.shape[-1] // 2
+
+        for k in range(images):
+            fig, axes = plt.subplots(2, N_waves)
+            for j in range(N_waves):
+                for i in range(2):
+                    ax = axes[i][j]
+                    idx = i + 2 * j
+                    img = ax.imshow(array[k, :, :, idx], cmap=cmap)
+                    ax.get_xaxis().set_visible(False)
+                    ax.get_yaxis().set_visible(False)
+                    plt.colorbar(img, ax=ax, orientation='horizontal')
+
+    show_PSF_multiwave(train_PSF)
+    plt.show()
+
+    # Train the Calibration Model on images with the nominal defocus
+    calib = calibration.Calibration(PSF_model=PSFs)
+    calib.create_cnn_model(layer_filers, kernel_size, name='CALIBR', activation='relu')
+    losses = calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                           N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                           readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
 
 

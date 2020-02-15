@@ -46,7 +46,7 @@ N_train, N_test = 10000, 1000       # Samples for the training of the models
 coef_strength = 0.30                # Strength of the actuator coefficients
 diversity = 0.55                    # Strength of extra diversity commands
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
-layer_filers = [64, 32, 16, 8]      # How many filters per layer
+layer_filters = [64, 32, 16, 8]      # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
 SNR = 750                           # SNR for the Readout Noise
@@ -124,7 +124,7 @@ if __name__ == "__main__":
 
     # Train the Calibration Model on images with the nominal defocus
     calib = calibration.Calibration(PSF_model=PSF_nom)
-    calib.create_cnn_model(layer_filers, kernel_size, name='CALIBR', activation='relu')
+    calib.create_cnn_model(layer_filters, kernel_size, name='CALIBR', activation='relu')
     losses = calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
                                            N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
@@ -287,22 +287,36 @@ if __name__ == "__main__":
 
     # Robust Calibration Model
     robust_calib = calibration.Calibration(PSF_model=PSF_nom)
-    robust_calib.create_cnn_model(layer_filers, kernel_size, name='ROBUST', activation='relu')
+    robust_calib.create_cnn_model(layer_filters, kernel_size, name='ROBUST', activation='relu')
     losses = robust_calib.train_calibration_model(train_PSF_robust, train_coef_robust, test_PSF_robust, test_coef_robust,
                                                   N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                                   readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
 
     # Test the robust model
+    # We go further from the +- 5 percent that the robust model was trained for to see waht happens
+    SPAX_ERR_ROB = 0.10
+    WAVE_MIN_ROB = WAVE * (1 - SPAX_ERR_ROB)
+    WAVE_MAX_ROB = WAVE * (1 + SPAX_ERR_ROB)
+    N = 21
+
+    centers_multiwave_rob = psf.actuator_centres_multiwave(N_actuators=N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC,
+                                                       N_waves=N, wave0=WAVE_MIN_ROB, waveN=WAVE_MAX_ROB, wave_ref=WAVE)
+    rbf_matrices_rob = psf.actuator_matrix_multiwave(centres=centers_multiwave_rob, alpha_pc=alpha_pc, rho_aper=RHO_APER,
+                                                 rho_obsc=RHO_OBSC, N_waves=N,  wave0=WAVE_MIN_ROB, waveN=WAVE_MAX_ROB,
+                                                 wave_ref=WAVE, N_PIX=N_PIX)
+
+    spax_errs_rob = np.linspace(-SPAX_ERR_ROB, SPAX_ERR_ROB, N, endpoint=True)
+    spax_scales_rob = SPAX * (1 - spax_errs_rob)
     mus_nyq_rob, std_nyq_rob = [], []
     print("\nLooping over Spaxel Scale Errors")
-    for i, spaxel_error in enumerate(spax_errs):
+    for i, spaxel_error in enumerate(spax_errs_rob):
 
         print("\nSpaxel Error: %.1f percent" % (100 * spaxel_error))
 
         # Generate the PSF model with the wrong Spaxel Scale
-        PSF_error = psf.PointSpreadFunction(rbf_matrices[i], N_pix=N_PIX, crop_pix=pix,
+        PSF_error = psf.PointSpreadFunction(rbf_matrices_rob[i], N_pix=N_PIX, crop_pix=pix,
                                             diversity_coef=diversity_defocus)
-        test_PSF_error, test_coef_error, _PSF, _coef = calibration.generate_dataset(PSF_error, 1000, 1,
+        test_PSF_error, test_coef_error, _PSF, _coef = calibration.generate_dataset(PSF_error, 500, 1,
                                                                                     coef_strength, rescale)
 
         robust_calib.PSF_model = PSF_error
@@ -316,19 +330,36 @@ if __name__ == "__main__":
         mus_nyq_rob.append(avg)
         std_nyq_rob.append(std)
 
+    MIN_SPAX_ROB = SPAX * (1 - SPAX_ERR)
+    MAX_SPAX_ROB = SPAX * (1 + SPAX_ERR)
 
     plt.figure()
     plt.errorbar(spax_scales, mus_nyq, std_nyq, fmt='o', label='Nominal')        # Nominal Model
     plt.plot(spax_scales, mus_nyq, color='blue')
 
-    plt.errorbar(spax_scales, mus_nyq_rob, std_nyq_rob, fmt='o', label='Nominal')        # Robust Model
-    plt.plot(spax_scales, mus_nyq_rob, color='blue')
+    plt.errorbar(spax_scales_rob, mus_nyq_rob, std_nyq_rob, fmt='o', label='Robust')        # Robust Model
+    plt.plot(spax_scales_rob, mus_nyq_rob, color='orange')
 
+    # plt.axvline(MIN_SPAX_ROB, linestyle='--', alpha=0.7)
+    # plt.axvline(MAX_SPAX_ROB, linestyle='--', alpha=0.7)
+    plt.fill_between(x=[MIN_SPAX_ROB, MAX_SPAX_ROB], y1=0, y2=60, alpha=0.25, color='orange')
+
+    plt.legend(title='Model', loc=3)
     plt.xlabel(r'Spaxel Scales [mas]')
     plt.ylabel(r'RMS after calibration [nm]')
-    plt.ylim(ymin=0)
+    plt.ylim([0, 60])
     plt.show()
 
+    ensemb_calib = calibration.CalibrationEnsemble(PSF_model=PSF_nom)
+    ensemb_calib.generate_ensemble_models(N_models=5, layer_filters=layer_filters, kernel_size=kernel_size,
+                                          name='ENSEMBLE', activation='relu')
+    ensemb_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
+                                           N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                           readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
+    RMS_evolution, residual = ensemb_calib.calibrate_iterations_ensemble(test_PSF, test_coef, wavelength=WAVE,
+                                                                         N_iter=N_iter, readout_noise=True,
+                                                                         RMS_readout=1./SNR)
+    ensemb_calib.plot_RMS_evolution(RMS_evolution)
 
 
 
