@@ -258,6 +258,16 @@ class Calibration(object):
     def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu', dropout=None):
         """
         Creates a CNN model for NCPA calibration
+
+        It accepts both [Single Wavelength] and [Multiwavelength] approaches
+        if [Single Wavelength] the input datacube is [:, pix, pix, 2] Nominal and Defocus PSF images
+        if [Multiwavelength] the input datacube is [:, pix, pix, 2 x N_waves] Nom+Defoc for each wavelength channel
+
+        :param layer_filters: list containing number of CNN filters per layer
+        :param kernel_size: list of CNN layer kernel sizes
+        :param name: (str) name of the CNN model
+        :param activation: (str) type of activation function (default: ReLu)
+        :param dropout: dropout rate. If NOT None, then all layers have dropout
         :return:
         """
 
@@ -268,13 +278,13 @@ class Calibration(object):
         except AttributeError:
             N_waves = 1
 
-
         pix = self.PSF_model.crop_pix
         input_shape = (pix, pix, 2 * N_waves,)        # Multiple Wavelength Channels
         model = Sequential()
         model.name = name
         model.add(Conv2D(layer_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
                          activation=activation, input_shape=input_shape))
+
         if dropout is not None:
             model.add(Dropout(rate=dropout))
             for N_filters in layer_filters[1:]:
@@ -287,7 +297,7 @@ class Calibration(object):
                 model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
             model.add(Flatten())
 
-        model.add(Dense(self.PSF_model.N_coef))
+        model.add(Dense(self.PSF_model.N_coef))         # N_classes is the number of NCPA coefficients of the PSF model
         model.summary()
         model.compile(optimizer='adam', loss='mean_squared_error')
 
@@ -333,7 +343,6 @@ class Calibration(object):
                 train_noisy_images = train_images
                 train_noisy_coefs = train_coefs
                 test_noisy_images = test_images
-
 
             train_history = self.cnn_model.fit(x=train_noisy_images, y=train_noisy_coefs,
                                                validation_data=(test_noisy_images, test_coefs),
@@ -424,6 +433,7 @@ class Calibration(object):
     def calculate_RMS(self, coef_before, coef_after, wavelength):
         """
         Using the PSF model, calculate the RMS wavefront BEFORE and AFTER corrections
+        We use this to loop over the calibration
         :param coef_before:
         :param coef_after:
         :param wavelength: working wavelength [microns]
@@ -511,6 +521,8 @@ class Calibration(object):
         force_training_mode = K.function([dropout_model.layers[0].input, K.learning_phase()],
                                          [dropout_model.layers[-1].output])
         N_classes = self.PSF_model.N_coef
+
+        # results is [N_samples, N_PSF, N_coef] where axis=0 is the Posterior of the predictions
         result = np.zeros((N_samples,) + (test_images.shape[0], N_classes))
 
         for i in range(N_samples):
@@ -574,6 +586,10 @@ class CalibrationEnsemble(Calibration):
                                 N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                 readout_noise=False, RMS_readout=[1. / 100], readout_copies=3):
 
+        """
+        Loop over the models in the list of Ensemble Models and train them
+        """
+
         for _model in self.ensemble_models:
             self.cnn_model = _model
             print("\nTraining Ensemble Model | ", _model.name)
@@ -582,9 +598,19 @@ class CalibrationEnsemble(Calibration):
                                 readout_noise, RMS_readout, readout_copies)
 
     def average_predictions(self, images, how_many_models, dropout=False, N_samples_drop=None):
+        """
+        Use the models in the list of Ensemble Models to get multiple predictions for a given test set
+        and average across those predictions
+        :param images: test PSF images (already noisy)
+        :param how_many_models: how many ensemble models to average across
+        :param dropout: if True (models have Dropout) we predict with uncertainty, i.e. we sample the posterior
+        :param N_samples_drop: if dropout is True, how many samples for the posterior
+        :return:
+        """
 
         _predictions = []
         for _model in self.ensemble_models[:how_many_models]:
+            print("\nPredicting with model: ", _model.name)
             if dropout is False:
                 _predictions.append(_model.predict(images))
             else:

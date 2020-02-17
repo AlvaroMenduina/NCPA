@@ -1,8 +1,18 @@
 """
 
-                          -||  ENSEMBLE  ||-
+                               -||  ENSEMBLE  &  DROPOUT ||-
 
 Does it help to use an Ensemble of calibration models to average across the predictions?
+In this script we look at 2 common approaches in Machine Learning for performance enhancement
+
+    (1) ENSEMBLE: training multiple models with the same datasets can be used to improve performance
+        because of randomized training conditions, multiple models will end up with different behaviours
+        even after being exposed to the same training set.
+        After training, one can average across the predictions of many models to obtain robust predictions
+
+        We test this approach to show that we can gain some performance by training an ensemble of models
+
+    (2) DROPOUT:
 
 Author: Alvaro Menduina
 Date: Feb 2020
@@ -79,6 +89,8 @@ if __name__ == """__main__""":
     #                                    Machine Learning | Single Calibration Model
     # ================================================================================================================ #
 
+    # Let us begin with a baseline design. One calibration model with No Dropout or anything fancy
+
     SNR = 250
 
     # Generate training and test datasets (clean PSF images)
@@ -101,7 +113,7 @@ if __name__ == """__main__""":
     #                             Ensemble Approach | Multiple Calibration Models
     # ================================================================================================================ #
 
-    N_ensemble = 10
+    N_ensemble = 5
     ensemb_calib = calibration.CalibrationEnsemble(PSF_model=PSF_actuators)
     ensemb_calib.generate_ensemble_models(N_models=N_ensemble, layer_filters=layer_filters, kernel_size=kernel_size,
                                           name='ENSEMBLE', activation='relu')
@@ -109,6 +121,7 @@ if __name__ == """__main__""":
                                            N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
 
+    # Let's see what happens to the performance as a function of the Number of ensemble models we average across
     mus_ens, sts_ens = [], []
     print("\nTesting Ensemble Models")
     for how_many in np.arange(1, N_ensemble + 1):
@@ -128,6 +141,7 @@ if __name__ == """__main__""":
     print("%d Models | RMS after: %.2f +- %.2f nm" % (N_ensemble, mus_ens[-1], sts_ens[-1]))
     print("Relative improvement: %.1f per cent" % improv_mu)
 
+    # Plot of how the performance improves with N models
     plt.figure()
     plt.errorbar(np.arange(1, N_ensemble + 1), mus_ens, yerr=sts_ens, fmt='o')
     plt.ylim(bottom=0)
@@ -136,6 +150,9 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
     #                                   Dropout
     # ================================================================================================================ #
+
+    # Let's train a calibration model that has Dropout after each CNN layer
+    # Quick way to model "Bayesian Neural Networks" and get access to uncertainties in the predictions
 
     # Dropout Calibration Model ||
     drop_calib = calibration.Calibration(PSF_model=PSF_actuators)
@@ -174,20 +191,17 @@ if __name__ == """__main__""":
 
     n_grid = int(np.floor(np.sqrt(N_act)))
 
-    for k in range(5):
-        plt.figure()
-        plt.scatter(test_coef[:, k], residual_nom, s=5)
-        plt.scatter(test_coef[:, k], test_coef[:, k]- mean_drop[:, k], s=5)
-
 
     # ================================================================================================================ #
     #                                   Ensemble of Dropout
     # ================================================================================================================ #
 
+    # Let's see if an ensemble of models WITH Dropout perform better than an ensemble of models WITHOUT it
+
     N_ens_drop = 5
     ensemb_drop_calib = calibration.CalibrationEnsemble(PSF_model=PSF_actuators)
     ensemb_drop_calib.generate_ensemble_models(N_models=N_ens_drop, layer_filters=layer_filters, kernel_size=kernel_size,
-                                               name='ENSEMBLE_DROPOUT', activation='relu', drop_out=0.15)
+                                               name='ENSEMBLE_DROPOUT', activation='relu', drop_out=0.05)
     ensemb_drop_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
                                            N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
@@ -195,5 +209,20 @@ if __name__ == """__main__""":
     RMS_ens_drop, _rr = ensemb_drop_calib.calibrate_iterations_ensemble(N_ens_drop, test_PSF, test_coef, wavelength=WAVE,
                                                                         N_iter=N_iter, readout_noise=True, RMS_readout=1./SNR,
                                                                         dropout=True, N_samples_drop=500)
+
+    final_RMS = RMS_ens_drop[-1][-1]
+    mu_ens_drop = np.mean(final_RMS)
+    std_ens_drop = np.std(final_RMS)
+
+    # Check whether the predictions vary across the models in the list
+    noisy_test_PSF = ensemb_drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
+    k = 0
+    plt.figure()
+    for _model in ensemb_drop_calib.ensemble_models:
+        drop_calib.cnn_model = _model
+        _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
+        plt.hist(_drop_results[:, 0, k], histtype='step', label=_model.name)
+    plt.legend()
+    plt.show()
 
 
