@@ -4,8 +4,9 @@ import matplotlib.cm as cm
 import os
 from time import time
 
-from keras.layers import Dense, Conv2D, Flatten
+from keras.layers import Dense, Conv2D, Flatten, Dropout
 from keras.models import Sequential
+from keras import backend as K
 from numpy.linalg import norm as norm
 
 import noise
@@ -254,7 +255,7 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu'):
+    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu', dropout=None):
         """
         Creates a CNN model for NCPA calibration
         :return:
@@ -274,10 +275,18 @@ class Calibration(object):
         model.name = name
         model.add(Conv2D(layer_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
                          activation=activation, input_shape=input_shape))
-        for N_filters in layer_filters[1:]:
-            model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
+        if dropout is not None:
+            model.add(Dropout(rate=dropout))
+            for N_filters in layer_filters[1:]:
+                model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
+                model.add(Dropout(rate=dropout))
+            model.add(Flatten())
+            model.add(Dropout(rate=dropout))
+        else:
+            for N_filters in layer_filters[1:]:
+                model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
+            model.add(Flatten())
 
-        model.add(Flatten())
         model.add(Dense(self.PSF_model.N_coef))
         model.summary()
         model.compile(optimizer='adam', loss='mean_squared_error')
@@ -285,6 +294,7 @@ class Calibration(object):
         self.cnn_model = model
 
         return
+
 
     def validation_loss(self, test_images, test_coefs):
         """
@@ -436,7 +446,7 @@ class Calibration(object):
         return RMS0, RMS
 
     def calibrate_iterations(self, test_images, test_coefs, wavelength, N_iter=3,
-                             readout_noise=False, RMS_readout=1./100):
+                             readout_noise=False, RMS_readout=1./100, dropout=False, N_samples_drop=None):
 
         """
         Run the calibration for several iterations
@@ -445,6 +455,8 @@ class Calibration(object):
         :param N_iter: how many iterations to run
         :param readout_noise: whether to add READOUT NOISE
         :param RMS_readout: how much READOUT NOISE to add, RMS 1/SNR
+        :param dropout: whether to use a CNN with dropout
+        :param N_samples_drop: number of times to sample the posterior [if dropout is True]
         :return:
         """
         if readout_noise is True:
@@ -456,7 +468,13 @@ class Calibration(object):
         RMS_evolution = []
         for k in range(N_iter):
             print("\nNCPA Calibration | Iteration %d/%d" % (k + 1, N_iter))
-            predicted_coefs = self.cnn_model.predict(images_before)
+
+            if dropout is False:
+                predicted_coefs = self.cnn_model.predict(images_before)
+            else:
+                _pred, mean_pred, _uncert = self.predict_with_uncertainty(images_before, N_samples_drop)
+                predicted_coefs = mean_pred
+
             coefs_after = coefs_before - predicted_coefs
             rms_before, rms_after = self.calculate_RMS(coefs_before, coefs_after, wavelength)
             rms_pair = [rms_before, rms_after]
@@ -474,6 +492,33 @@ class Calibration(object):
         final_residuals = coefs_after
 
         return RMS_evolution, final_residuals
+
+    def predict_with_uncertainty(self, test_images, N_samples):
+        """
+        Makes use of the fact that our model has Dropout to sample from
+        the posterior of predictions to get an estimate of the uncertainty of the predictions
+        :param dropout_model: a CNN model with Dropout
+        :param test_images: the test images to be used
+        :param N_samples: number of times to sample the posterior
+        :return:
+        """
+
+        print("\nUsing Dropout model to predict with Uncertainty")
+        print("%d Samples of the posterior" % N_samples)
+        dropout_model = self.cnn_model
+        # force_training_mode: a Keras function that forces the model to act on "training mode" because Keras
+        # freezes the Dropout during testing
+        force_training_mode = K.function([dropout_model.layers[0].input, K.learning_phase()],
+                                         [dropout_model.layers[-1].output])
+        N_classes = self.PSF_model.N_coef
+        result = np.zeros((N_samples,) + (test_images.shape[0], N_classes))
+
+        for i in range(N_samples):
+            result[i, :, :] = force_training_mode((test_images, 1))[0]
+        prediction = result.mean(axis=0)
+        uncertainty = result.std(axis=0)
+
+        return result, prediction, uncertainty
 
     @staticmethod
     def plot_RMS_evolution(RMS_evolution):
@@ -507,12 +552,21 @@ class CalibrationEnsemble(Calibration):
     It allows us to train an Ensemble of Calibration models on the same dataset
     """
 
-    def generate_ensemble_models(self, N_models, layer_filters, kernel_size, name, activation='relu'):
+    def generate_ensemble_models(self, N_models, layer_filters, kernel_size, name, activation='relu', drop_out=None):
+        """
+        Create a list of CNN models for calibration
+        :param N_models:
+        :param layer_filters:
+        :param kernel_size:
+        :param name:
+        :param activation:
+        :return:
+        """
 
         self.ensemble_models = []
         for k in range(N_models):
             new_name = name + '_%d' % (k + 1)
-            self.create_cnn_model(layer_filters, kernel_size, new_name, activation)
+            self.create_cnn_model(layer_filters, kernel_size, new_name, activation, drop_out)
             self.ensemble_models.append(self.cnn_model)
         del self.cnn_model
 
@@ -527,20 +581,30 @@ class CalibrationEnsemble(Calibration):
                                 N_loops, epochs_loop, verbose, batch_size_keras, plot_val_loss,
                                 readout_noise, RMS_readout, readout_copies)
 
-    def average_predictions(self, images):
+    def average_predictions(self, images, how_many_models, dropout=False, N_samples_drop=None):
 
         _predictions = []
-        for _model in self.ensemble_models:
-            _predictions.append(_model.predict(images))
+        for _model in self.ensemble_models[:how_many_models]:
+            if dropout is False:
+                _predictions.append(_model.predict(images))
+            else:
+                self.cnn_model = _model
+                _pred, mean_pred, _uncert = self.predict_with_uncertainty(images, N_samples_drop)
+                _predictions.append(mean_pred)
+
         _predictions = np.stack(_predictions)
+        print(_predictions.shape)
 
         return np.mean(_predictions, axis=0)
 
-    def calibrate_iterations_ensemble(self, test_images, test_coefs, wavelength, N_iter=3,
-                                      readout_noise=False, RMS_readout=1./100):
+    def calibrate_iterations_ensemble(self, how_many_models, test_images, test_coefs, wavelength, N_iter=3,
+                                      readout_noise=False, RMS_readout=1./100, dropout=False, N_samples_drop=None):
 
         """
         Modified self.calibrate_iterations to account for the existence of multiple Ensemble Models
+        :param: how_many_models: how many models from the ensemble list to use
+
+
         :param test_images: datacube of test PSF images ("clean")
         :param test_coefs: datacube of test coefficients ("clean")
         :param N_iter: how many iterations to run
@@ -559,7 +623,7 @@ class CalibrationEnsemble(Calibration):
             print("\nNCPA Calibration | Iteration %d/%d" % (k + 1, N_iter))
 
             #### This is the bit we are overriding!
-            predicted_coefs = self.average_predictions(images_before)
+            predicted_coefs = self.average_predictions(images_before, how_many_models, dropout, N_samples_drop)
             ####
 
             coefs_after = coefs_before - predicted_coefs

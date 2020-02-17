@@ -350,16 +350,7 @@ if __name__ == "__main__":
     plt.ylim([0, 60])
     plt.show()
 
-    ensemb_calib = calibration.CalibrationEnsemble(PSF_model=PSF_nom)
-    ensemb_calib.generate_ensemble_models(N_models=5, layer_filters=layer_filters, kernel_size=kernel_size,
-                                          name='ENSEMBLE', activation='relu')
-    ensemb_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
-                                           N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
-                                           readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
-    RMS_evolution, residual = ensemb_calib.calibrate_iterations_ensemble(test_PSF, test_coef, wavelength=WAVE,
-                                                                         N_iter=N_iter, readout_noise=True,
-                                                                         RMS_readout=1./SNR)
-    ensemb_calib.plot_RMS_evolution(RMS_evolution)
+
 
 
 
