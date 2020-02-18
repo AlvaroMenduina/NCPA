@@ -119,7 +119,7 @@ def generate_dataset(PSF_model, N_train, N_test, coef_strength, rescale=0.35):
                 im_foc, _s = PSF_model.compute_PSF(coefs[i], wave_idx=wave_idx, diversity=True)
                 dataset[i, :, :, 2*wave_idx + 1] = im_foc
 
-            if i % 100 == 0:
+            if i % 100 == 0 and i > 0:
                 delta_time = time() - start
                 estimated_total = delta_time * N_samples / i
                 remaining = estimated_total - delta_time
@@ -239,7 +239,7 @@ class Calibration(object):
         """
 
         print("\nUpdating the PSF images")
-        N_channels = 2
+        N_channels = 2                          # [Nominal, Defocused]
         pix = self.PSF_model.crop_pix
         N_samples = coefs.shape[0]
         dataset = np.zeros((N_samples, pix, pix, N_channels))
@@ -247,11 +247,42 @@ class Calibration(object):
             if i % 500 == 0:
                 print(i)
 
-            im0, _s = self.PSF_model.compute_PSF(coefs[i])
+            im0, _s = self.PSF_model.compute_PSF(coefs[i])                      # Nominal PSF
             dataset[i, :, :, 0] = im0
 
-            im_foc, _s = self.PSF_model.compute_PSF(coefs[i], diversity=True)
+            im_foc, _s = self.PSF_model.compute_PSF(coefs[i], diversity=True)   # Defocused PSF
             dataset[i, :, :, 1] = im_foc
+        print("Updated")
+        return dataset
+
+    def update_PSF_multiwave(self, coefs):
+        """
+        Multiwave version of Update_PSF
+        :param coefs:
+        :return:
+        """
+
+        print("\nUpdating the PSF images | Multiwave")
+        N_waves = self.PSF_model.N_waves
+        pix = self.PSF_model.crop_pix
+        N_samples = coefs.shape[0]
+        dataset = np.zeros((N_samples, pix, pix, 2*N_waves))
+
+        start = time()
+        for i in range(N_samples):                  # Loop over the PSF images
+            for wave_idx in range(N_waves):         # Loop over the Wavelength Channels [Nom, Foc, Nom, Foc...]
+                im0, _s = self.PSF_model.compute_PSF(coefs[i], wave_idx=wave_idx)
+                dataset[i, :, :, 2*wave_idx] = im0
+
+                im_foc, _s = self.PSF_model.compute_PSF(coefs[i], wave_idx=wave_idx, diversity=True)
+                dataset[i, :, :, 2*wave_idx + 1] = im_foc
+
+            if i % 100 == 0 and i > 0:
+                delta_time = time() - start
+                estimated_total = delta_time * N_samples / i
+                remaining = estimated_total - delta_time
+                message = "%d | t=%.1f sec | ETA: %.1f sec (%.1f min)" % (i, delta_time, remaining, remaining / 60)
+                print(message)
         print("Updated")
         return dataset
 
@@ -439,13 +470,19 @@ class Calibration(object):
         :param wavelength: working wavelength [microns]
         :return:
         """
+        if self.PSF_model.N_waves == 1:
+            model_matrix_flat = self.PSF_model.model_matrix_flat
+        else:
+            i_wave = np.argwhere(self.PSF_model.wavelengths == wavelength)[0][0]
+            print(i_wave)
+            model_matrix_flat = self.PSF_model.model_matrices_flat[i_wave]
 
         N_samples = coef_before.shape[0]
         print("\nCalculating RMS before / after for %d samples" % N_samples)
         RMS0, RMS = [], []
         for k in range(N_samples):
-            wavef_before = wavelength * 1e3 * np.dot(self.PSF_model.model_matrix_flat, coef_before[k])
-            wavef_after = wavelength * 1e3 * np.dot(self.PSF_model.model_matrix_flat, coef_after[k])
+            wavef_before = wavelength * 1e3 * np.dot(model_matrix_flat, coef_before[k])
+            wavef_after = wavelength * 1e3 * np.dot(model_matrix_flat, coef_after[k])
             RMS0.append(np.std(wavef_before))
             RMS.append(np.std(wavef_after))
         mu0, mu = np.mean(RMS0), np.mean(RMS)
@@ -493,7 +530,10 @@ class Calibration(object):
             if k == N_iter - 1:
                 break
             # Update the PSF and coefs
-            images_before = self.update_PSF(coefs_after)
+            if self.PSF_model.N_waves == 1:
+                images_before = self.update_PSF(coefs_after)
+            else:
+                images_before = self.update_PSF_multiwave(coefs_after)
             coefs_before = coefs_after
 
             if readout_noise is True:

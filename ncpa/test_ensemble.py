@@ -201,7 +201,7 @@ if __name__ == """__main__""":
     N_ens_drop = 5
     ensemb_drop_calib = calibration.CalibrationEnsemble(PSF_model=PSF_actuators)
     ensemb_drop_calib.generate_ensemble_models(N_models=N_ens_drop, layer_filters=layer_filters, kernel_size=kernel_size,
-                                               name='ENSEMBLE_DROPOUT', activation='relu', drop_out=0.05)
+                                               name='ENSEMBLE_DROPOUT', activation='relu', drop_out=0.10)
     ensemb_drop_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
                                            N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
@@ -214,15 +214,23 @@ if __name__ == """__main__""":
     mu_ens_drop = np.mean(final_RMS)
     std_ens_drop = np.std(final_RMS)
 
-    # Check whether the predictions vary across the models in the list
-    noisy_test_PSF = ensemb_drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
-    k = 0
-    plt.figure()
-    for _model in ensemb_drop_calib.ensemble_models:
-        drop_calib.cnn_model = _model
-        _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
-        plt.hist(_drop_results[:, 0, k], histtype='step', label=_model.name)
-    plt.legend()
-    plt.show()
+    print("\nPerformance Summary")
+    print("1 Model  | RMS after: %.2f +- %.2f nm" % (mus_ens[0], sts_ens[0]))
+    print("%d Models | RMS after: %.2f +- %.2f nm" % (N_ensemble, mus_ens[-1], sts_ens[-1]))
+    print("[Dropout] %d Models | RMS after: %.2f +- %.2f nm" % (N_ens_drop,mu_ens_drop, std_ens_drop))
+
+    # # Check whether the predictions vary across the models in the list
+    # noisy_test_PSF = ensemb_drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
+    # k = 0
+    # plt.figure()
+    # for _model in ensemb_drop_calib.ensemble_models:
+    #     drop_calib.cnn_model = _model
+    #     _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
+    #     plt.hist(_drop_results[:, 0, k], histtype='step', label=_model.name)
+    # plt.legend()
+    # plt.show()
+
+
+
 
 

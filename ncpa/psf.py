@@ -416,7 +416,11 @@ class PointSpreadFunctionMultiwave(object):
         :param coef:
         :return:
         """
-        self.diversity_phase = [np.dot(matrix, coef) for matrix in self.model_matrices]
+
+        # Remember to rescale the coefficients by the ratio of wavelengths
+        # we used a fixed defocus in [nm], but the coefficients are in radians!
+
+        self.diversity_phase = [np.dot(matrix, coef / r) for matrix, r in zip(self.model_matrices, self.wave_ratios)]
         return
 
     def compute_PSF(self, coef, wave_idx, diversity=False, crop=True):
@@ -426,9 +430,8 @@ class PointSpreadFunctionMultiwave(object):
         """
 
         # Remember to rescale the coefficients by the wavelength ratios
-        coef /= self.wave_ratios[wave_idx]
 
-        phase = np.dot(self.model_matrices[wave_idx], coef)
+        phase = np.dot(self.model_matrices[wave_idx], coef / self.wave_ratios[wave_idx])
         if diversity:
             phase += self.diversity_phase[wave_idx]
 
