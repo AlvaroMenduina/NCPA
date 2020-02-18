@@ -48,14 +48,14 @@ WAVEN = 2.00                        # Maximum wavelength
 N_WAVES = 5                         # How many wavelength channels to consider
 
 # Machine Learning bits
-N_train, N_test = 10000, 1000       # Samples for the training of the models
-coef_strength = 0.30                # Strength of the actuator coefficients
+N_train, N_test = 10000, 500        # Samples for the training of the models
+coef_strength = 0.40                # Strength of the actuator coefficients
 diversity = 0.55                    # Strength of extra diversity commands
-rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
+rescale = 0.30                      # Rescale the coefficients to cover a wide range of RMS
 layer_filers = [64, 32, 16, 8]      # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
-SNR = 750                           # SNR for the Readout Noise
+SNR = 500                           # SNR for the Readout Noise
 N_loops, epochs_loop = 5, 5         # How many times to loop over the training
 readout_copies = 2                  # How many copies with Readout Noise to use
 N_iter = 3                          # How many iterations to run the calibration (testing)
@@ -189,7 +189,7 @@ if __name__ == """__main__""":
                     ax.get_yaxis().set_visible(False)
                     plt.colorbar(img, ax=ax, orientation='horizontal')
 
-    show_PSF_multiwave(train_PSF)
+    show_PSF_multiwave(test_PSF)
     plt.show()
 
     # Train the Calibration Model with the complete Wavelength Datacube
@@ -201,26 +201,26 @@ if __name__ == """__main__""":
 
     RMS_evolution, residual = calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
                                                          readout_noise=True, RMS_readout=1./SNR)
-    MU, STD = np.mean(RMS_evolution), np.std(RMS_evolution)
+    MU, STD = np.mean(RMS_evolution[-1][-1]), np.std(RMS_evolution[-1][-1])
 
     calib.plot_RMS_evolution(RMS_evolution)
-
-    phase = np.dot(PSFs.model_matrices_flat[0], test_coef[1])
-    rms = np.std(WAVE * 1e3 * phase)
-    plt.figure()
-    plt.imshow((PSFs.model_matrices[0][:,:,0]))
-    plt.colorbar()
     plt.show()
 
     ### ============================================================================================================ ###
     # Does the number of channels we use matter?
     # Let's train several models with different number of wavelength channels
     mu_chans, std_chans = [], []
-    wave_channels = np.arange(1, N_WAVES + 1)
+    wave_channels = np.arange(2, N_WAVES + 1)
     for N_channels in wave_channels:
         print("\nTraing Model with %d Wavelength Channels" % N_channels)
-        _calib = calibration.Calibration(PSF_model=PSFs)
-        _calib.PSF_model.N_waves = N_channels
+
+        _PSFs = psf.PointSpreadFunctionMultiwave(matrices=actuator_matrices[:N_channels], N_waves=N_channels,
+                                                 wave0=WAVE0, waveN=waves[N_channels - 1], wave_ref=WAVE,
+                                                 N_pix=N_PIX, crop_pix=pix, diversity_coef=diversity_defocus)
+        print(_PSFs.wavelengths)
+
+        _calib = calibration.Calibration(PSF_model=_PSFs)
+        _calib.create_cnn_model(layer_filers, kernel_size, name='%d_WAVES' % N_channels, activation='relu')
         # Slice the datasets up to a certain channel
         sliced_train_PSF = train_PSF[:, :, :, :2*N_channels]
         sliced_test_PSF = test_PSF[:, :, :, :2*N_channels]
@@ -234,14 +234,6 @@ if __name__ == """__main__""":
         mu_chans.append(mu)
         std_chans.append(std)
 
-    plt.figure()
-    plt.errorbar(wave_channels, mu_chans, yerr=std_chans, fmt='o')
-    plt.plot(wave_channels, mu_chans)
-    plt.xlabel(r'Number of Wavelength Channels')
-    plt.ylabel(r'RMS after calibration [nm]')
-    plt.ylim(bottom=0)
-    plt.show()
-
     ### ============================================================================================================ ###
     # Are we gaining performance just from the fact that the last channel has a longer wavelength
     # and thus a better sampling of the PSF?
@@ -254,23 +246,31 @@ if __name__ == """__main__""":
     first_channel = calibration.Calibration(PSF_model=PSFs)
     # override the N_waves to force create_cnn_model to have the proper number of channels
     first_channel.PSF_model.N_waves = 1
+    first_channel.create_cnn_model(layer_filers, kernel_size, name='FIRST', activation='relu')
     # make sure to slice the datacubes to only include the first 2 channels
     _losses = first_channel.train_calibration_model(train_PSF[:, :, :, :2], train_coef, test_PSF[:, :, :, :2], test_coef,
-                                           N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                                    N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
+    # to calibrate iterations we need to trick the model into thinking it's multichannel!
+    # because of the difference between self.model_matrix and self.model_matrices
+    first_channel.PSF_model.N_waves = N_WAVES
     first_rms, _residual = first_channel.calibrate_iterations(test_PSF[:, :, :, :2], test_coef, wavelength=WAVE, N_iter=N_iter,
-                                                  readout_noise=True, RMS_readout=1. / SNR)
+                                                  readout_noise=True, RMS_readout=1. / SNR,
+                                                              multiwave_slice=(0, 2))
     first_rms = first_rms[-1][-1]
     first_mu, first_std = np.mean(first_rms), np.std(first_rms)
 
     ### LAST Channel (WAVEN)
     last_channel = calibration.Calibration(PSF_model=PSFs)
     last_channel.PSF_model.N_waves = 1
+    last_channel.create_cnn_model(layer_filers, kernel_size, name='LAST', activation='relu')
     _losses = last_channel.train_calibration_model(train_PSF[:, :, :, -2:], train_coef, test_PSF[:, :, :, -2:], test_coef,
                                            N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                            readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
+    last_channel.PSF_model.N_waves = N_WAVES
     last_rms, _residual = last_channel.calibrate_iterations(test_PSF[:, :, :, -2:], test_coef, wavelength=WAVE, N_iter=N_iter,
-                                                  readout_noise=True, RMS_readout=1. / SNR)
+                                                  readout_noise=True, RMS_readout=1. / SNR,
+                                                            multiwave_slice=(2*(N_WAVES - 1), 2 * N_WAVES))
     last_rms = last_rms[-1][-1]
     last_mu, last_std = np.mean(last_rms), np.std(last_rms)
 
@@ -279,6 +279,64 @@ if __name__ == """__main__""":
     print("Model trained on 1st Channel only [%.2f microns] || RMS: %.2f +- %.2f nm" % (WAVE0, first_mu, first_std))
     print("Model trained on Last Channel only [%.2f microns] || RMS: %.2f +- %.2f nm" % (WAVEN, last_mu, last_std))
     print("Model trained on All %d Channels || RMS: %.2f +- %.2f nm" % (N_WAVES, MU, STD))
+
+    _chan = np.linspace(1, N_WAVES, 20, endpoint=True)
+    theory = first_mu / np.sqrt(_chan)
+    # Does the number of channels we use matter?
+    plt.figure()
+    plt.errorbar([1], first_mu, yerr=first_std, fmt='o', label='Single Wavelength')
+    plt.plot(_chan, theory, linestyle='--', color='black', label=r'1/$\sqrt{N}$ fit')
+    plt.errorbar(wave_channels, mu_chans, yerr=std_chans, fmt='o', label='Multiwavelength')
+    # plt.plot(wave_channels, mu_chans)
+    plt.xlabel(r'Number of Wavelength Channels')
+    plt.ylabel(r'RMS after calibration [nm]')
+    plt.ylim(bottom=0)
+    plt.legend()
+    plt.xticks(np.arange(1, N_WAVES + 1))
+    plt.show()
+
+    ### Results as a function of SNR | N_WAVES 5 | Waves: 1.5 -> 2.0 microns
+    # SNR           1 wave          5 waves         delta mean [%]
+    # 100           60.3 +- 8.3     
+    # 125           53.4 +- 6.9     37.4 +- 4.0     16.0
+    # 250           34.4 +- 4.2     24.2 +- 2.6     10.2 [29.6%]
+    # 500           22.9 +- 2.4     17.0 +- 1.5     5.9
+
+    ### ============================================================================================================ ###
+    # Does the wavelength range matter?
+    # What happens if we use the same number of wavelengths but extend WAVEN longer?
+    N_WAVES = 5
+    SNR = 250
+    long_waves = [1.75, 2.0, 2.25, 2.5]
+    mu_long, std_long = [], []
+    for wave_N in long_waves:
+        _centres = psf.actuator_centres_multiwave(N_actuators=N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC,
+                                                           N_waves=N_WAVES, wave0=WAVE0, waveN=wave_N, wave_ref=WAVE)
+
+        _matrices = psf.actuator_matrix_multiwave(centres=_centres, alpha_pc=alpha_pc, rho_aper=RHO_APER,
+                                                  rho_obsc=RHO_OBSC, N_waves=N_WAVES, wave0=WAVE0, waveN=wave_N,
+                                                  wave_ref=WAVE, N_PIX=N_PIX)
+        _PSFs = psf.PointSpreadFunctionMultiwave(matrices=_matrices, N_waves=N_WAVES,
+                                                 wave0=WAVE0, waveN=wave_N, wave_ref=WAVE,
+                                                 N_pix=N_PIX, crop_pix=pix, diversity_coef=diversity_defocus)
+
+        train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(_PSFs, N_train, 500,
+                                                                                  coef_strength, rescale)
+
+        long_calib = calibration.Calibration(PSF_model=_PSFs)
+        long_calib.create_cnn_model(layer_filers, kernel_size, name='LONG', activation='relu')
+        losses = long_calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                    N_loops, epochs_loop, verbose=1, batch_size_keras=32,
+                                                    plot_val_loss=False, readout_noise=True, RMS_readout=[1. / SNR],
+                                                    readout_copies=readout_copies)
+
+        RMS_evolution, residual = long_calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
+                                                                  readout_noise=True, RMS_readout=1. / SNR)
+        mu_long.append(np.mean(RMS_evolution[-1][-1]))
+        std_long.append(np.std(RMS_evolution[-1][-1]))
+
+
+
 
 
 

@@ -255,7 +255,7 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def update_PSF_multiwave(self, coefs):
+    def update_PSF_multiwave(self, coefs, multiwave_slice=None):
         """
         Multiwave version of Update_PSF
         :param coefs:
@@ -283,6 +283,9 @@ class Calibration(object):
                 remaining = estimated_total - delta_time
                 message = "%d | t=%.1f sec | ETA: %.1f sec (%.1f min)" % (i, delta_time, remaining, remaining / 60)
                 print(message)
+        if multiwave_slice is not None:
+            a, b = multiwave_slice
+            dataset = dataset[:, :, :, a:b]
         print("Updated")
         return dataset
 
@@ -493,7 +496,8 @@ class Calibration(object):
         return RMS0, RMS
 
     def calibrate_iterations(self, test_images, test_coefs, wavelength, N_iter=3,
-                             readout_noise=False, RMS_readout=1./100, dropout=False, N_samples_drop=None):
+                             readout_noise=False, RMS_readout=1./100, dropout=False, N_samples_drop=None,
+                             multiwave_slice=None):
 
         """
         Run the calibration for several iterations
@@ -533,7 +537,7 @@ class Calibration(object):
             if self.PSF_model.N_waves == 1:
                 images_before = self.update_PSF(coefs_after)
             else:
-                images_before = self.update_PSF_multiwave(coefs_after)
+                images_before = self.update_PSF_multiwave(coefs_after, multiwave_slice)
             coefs_before = coefs_after
 
             if readout_noise is True:

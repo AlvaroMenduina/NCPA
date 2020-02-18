@@ -381,7 +381,7 @@ class PointSpreadFunctionMultiwave(object):
         self.N_coef = matrices[0][0].shape[-1]     # How many Actuators / Zernike Modes
         self.model_matrices = [array[0].copy() for array in matrices]
         self.pupil_masks = [array[1].copy() for array in matrices]
-        self.model_matrices_flat = [array[0].copy() for array in matrices]
+        self.model_matrices_flat = [array[2].copy() for array in matrices]
 
         # Wavelength information
         self.wavelengths = np.linspace(wave0, waveN, N_waves, endpoint=True)
