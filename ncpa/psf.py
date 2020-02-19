@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from numpy.fft import fft2, fftshift
+from scipy.ndimage import zoom
 
 import zernike as zern
 
@@ -346,6 +347,42 @@ class PointSpreadFunction(object):
 
         return image, strehl
 
+    @staticmethod
+    def downsample_datacube(array, factor=0.5):
+        """
+        Downsample a datacube to a coarser spaxel scale
+        :param array:
+        :param factor: 0.5 means we go to a 2x coarser scale
+        :return:
+        """
+        print("\nDownsampling array by %.2fX" % (1. / factor))
+        shape = array.shape
+
+        if len(shape) == 2:     # Array [N_pix, N_pix]
+            new_array = zoom(array, zoom=factor)
+            print(new_array.shape)
+            return new_array
+
+        elif len(shape) == 3:     # Datacube [N_PSF, N_pix, N_pix]
+            N_PSF, old_pix, _p = shape
+            new_pix = int(factor * old_pix)
+            new_array = np.empty((N_PSF, new_pix, new_pix))
+            for k in range(N_PSF):
+                new_array[k] = zoom(array[k], zoom=factor)
+            return new_array
+
+        elif len(shape) == 4:     # Datacube [N_PSF, N_pix, N_pix, N_chan]
+            N_PSF, old_pix, _p, N_chan = shape
+            new_pix = int(factor * old_pix)
+            new_array = np.empty((N_PSF, new_pix, new_pix, N_chan))
+            for k in range(N_PSF):
+                for j in range(N_chan):
+                    new_array[k, :, :, j] = zoom(array[k, :, :, j], zoom=factor)
+            return new_array
+
+        else:
+            raise ValueError("Shape not understood")
+
     def plot_PSF(self, coef):
         """
         Plot an image of the PSF
@@ -453,6 +490,43 @@ class PointSpreadFunctionMultiwave(object):
             pass
 
         return image, strehl
+
+    @staticmethod
+    def downsample_datacube(array, factor=0.5):
+        """
+        Downsample a datacube to a coarser spaxel scale
+        :param array:
+        :param factor: 0.5 means we go to a 2x coarser scale
+        :return:
+        """
+        print("\nDownsampling array by %.2fX" % (1. / factor))
+        shape = array.shape
+
+        if len(shape) == 2:     # Array [N_pix, N_pix]
+            new_array = zoom(array, zoom=factor)
+            print(new_array.shape)
+            return new_array
+
+        elif len(shape) == 3:     # Datacube [N_PSF, N_pix, N_pix]
+            N_PSF, old_pix, _p = shape
+            new_pix = int(factor * old_pix)
+            new_array = np.empty((N_PSF, new_pix, new_pix))
+            for k in range(N_PSF):
+                new_array[k] = zoom(array[k], zoom=factor)
+            return new_array
+
+        elif len(shape) == 4:     # Datacube [N_PSF, N_pix, N_pix, N_chan]
+            N_PSF, old_pix, _p, N_chan = shape
+            new_pix = int(factor * old_pix)
+            new_array = np.empty((N_PSF, new_pix, new_pix, N_chan))
+            for k in range(N_PSF):
+                for j in range(N_chan):
+                    new_array[k, :, :, j] = zoom(array[k, :, :, j], zoom=factor)
+            return new_array
+
+        else:
+            raise ValueError("Shape not understood")
+
 
     def plot_PSF(self, coef, wave_idx, cmap='hot'):
         """

@@ -161,6 +161,20 @@ def plot_images(PSF_datacube, N_images=5):
         # img2.set_clim(0, 1)
         plt.colorbar(img2, ax=ax2, orientation='horizontal')
 
+def show_PSF_multiwave(array, images=5, cmap='hot'):
+    N_waves = array.shape[-1] // 2
+
+    for k in range(images):
+        fig, axes = plt.subplots(2, N_waves)
+        for j in range(N_waves):
+            for i in range(2):
+                ax = axes[i][j]
+                idx = i + 2 * j
+                img = ax.imshow(array[k, :, :, idx], cmap=cmap)
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
+                plt.colorbar(img, ax=ax, orientation='horizontal')
+
 def plot_actuator_commands(commands, centers, rho_aper, PIX, cmap='Reds', delta0=4, min_val=0.9):
 
     cent, delta = centers

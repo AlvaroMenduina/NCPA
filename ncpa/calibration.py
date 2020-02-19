@@ -230,7 +230,7 @@ class Calibration(object):
         print("Finished")
         return train_batches, coef_batches, test_images, test_coefs
 
-    def update_PSF(self, coefs):
+    def update_PSF(self, coefs, downsample=False):
         """
         Updates the PSF images after calibration. We use this to run the calibration
         for several iterations until it converges
@@ -252,10 +252,14 @@ class Calibration(object):
 
             im_foc, _s = self.PSF_model.compute_PSF(coefs[i], diversity=True)   # Defocused PSF
             dataset[i, :, :, 1] = im_foc
+
+        if downsample:
+            dataset = self.PSF_model.downsample_datacube(dataset)
+
         print("Updated")
         return dataset
 
-    def update_PSF_multiwave(self, coefs, multiwave_slice=None):
+    def update_PSF_multiwave(self, coefs, multiwave_slice=None, downsample=False):
         """
         Multiwave version of Update_PSF
         :param coefs:
@@ -283,6 +287,10 @@ class Calibration(object):
                 remaining = estimated_total - delta_time
                 message = "%d | t=%.1f sec | ETA: %.1f sec (%.1f min)" % (i, delta_time, remaining, remaining / 60)
                 print(message)
+
+        if downsample:
+            dataset = self.PSF_model.downsample_datacube(dataset)
+
         if multiwave_slice is not None:
             a, b = multiwave_slice
             dataset = dataset[:, :, :, a:b]
@@ -473,12 +481,14 @@ class Calibration(object):
         :param wavelength: working wavelength [microns]
         :return:
         """
-        if self.PSF_model.N_waves == 1:
-            model_matrix_flat = self.PSF_model.model_matrix_flat
-        else:
+        try:
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
             i_wave = np.argwhere(self.PSF_model.wavelengths == wavelength)[0][0]
             print(i_wave)
             model_matrix_flat = self.PSF_model.model_matrices_flat[i_wave]
+        except AttributeError:
+            model_matrix_flat = self.PSF_model.model_matrix_flat
 
         N_samples = coef_before.shape[0]
         print("\nCalculating RMS before / after for %d samples" % N_samples)
@@ -497,7 +507,7 @@ class Calibration(object):
 
     def calibrate_iterations(self, test_images, test_coefs, wavelength, N_iter=3,
                              readout_noise=False, RMS_readout=1./100, dropout=False, N_samples_drop=None,
-                             multiwave_slice=None):
+                             multiwave_slice=None, downsample=False):
 
         """
         Run the calibration for several iterations
@@ -508,6 +518,8 @@ class Calibration(object):
         :param RMS_readout: how much READOUT NOISE to add, RMS 1/SNR
         :param dropout: whether to use a CNN with dropout
         :param N_samples_drop: number of times to sample the posterior [if dropout is True]
+        :param multiwave_slice: (a, b) tuple: which wavelength channels to slice
+        :param downsample: bool, whether to downsample to a 2x coarser scale after updating the PSF images
         :return:
         """
         if readout_noise is True:
@@ -534,10 +546,13 @@ class Calibration(object):
             if k == N_iter - 1:
                 break
             # Update the PSF and coefs
-            if self.PSF_model.N_waves == 1:
-                images_before = self.update_PSF(coefs_after)
-            else:
-                images_before = self.update_PSF_multiwave(coefs_after, multiwave_slice)
+
+            try:
+                N_waves = self.PSF_model.N_waves
+                images_before = self.update_PSF_multiwave(coefs_after, multiwave_slice, downsample)
+            except AttributeError:
+                images_before = self.update_PSF(coefs_after, downsample)
+
             coefs_before = coefs_after
 
             if readout_noise is True:
@@ -577,21 +592,21 @@ class Calibration(object):
         return result, prediction, uncertainty
 
     @staticmethod
-    def plot_RMS_evolution(RMS_evolution):
+    def plot_RMS_evolution(RMS_evolution, colormap=cm.Blues, title=None):
         """
         Plot the evolution of RMS wavefront with calibration iterations
         :param RMS_evolution: list of pairs of RMS [(BEFORE, AFTER)_0, ..., (BEFORE, AFTER)_N]
         """
 
         N_pairs = len(RMS_evolution)  # Pairs of [Before, After]
-        blues = cm.Blues(np.linspace(0.5, 1.0, N_pairs))
+        colors = colormap(np.linspace(0.5, 1.0, N_pairs))
 
         plt.figure()
         for i, rms_pair in enumerate(RMS_evolution):
             before, after = rms_pair[0], rms_pair[1]
             print(len(before), len(after))
             label = r"%d | $\mu$=%.1f $\pm$ %.1f nm" % (i + 1, np.mean(after), np.std(after))
-            plt.scatter(before, after, s=4, color=blues[i], label=label)
+            plt.scatter(before, after, s=4, color=colors[i], label=label)
 
         plt.xlim([0, 300])
         plt.ylim([0, 200])
@@ -599,6 +614,8 @@ class Calibration(object):
         plt.legend(title='Iteration', loc=2)
         plt.xlabel(r'RMS wavefront BEFORE [nm]')
         plt.ylabel(r'RMS wavefront AFTER [nm]')
+        if title is not None:
+            plt.title(title)
 
 
 class CalibrationEnsemble(Calibration):

@@ -42,16 +42,15 @@ utils.check_spaxel_scale(rho_aper=RHO_APER, wavelength=WAVE)
 N_actuators = 20                    # Number of actuators in [-1, 1] line
 alpha_pc = 10                       # Height [percent] at the neighbour actuator (Gaussian Model)
 
-
 WAVE0 = WAVE                        # Minimum wavelength
 WAVEN = 2.00                        # Maximum wavelength
 N_WAVES = 5                         # How many wavelength channels to consider
 
 # Machine Learning bits
 N_train, N_test = 10000, 500        # Samples for the training of the models
-coef_strength = 0.40                # Strength of the actuator coefficients
+coef_strength = 0.30                # Strength of the actuator coefficients
 diversity = 0.55                    # Strength of extra diversity commands
-rescale = 0.30                      # Rescale the coefficients to cover a wide range of RMS
+rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filers = [64, 32, 16, 8]      # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
@@ -175,21 +174,7 @@ if __name__ == """__main__""":
     test_PSF = np.load(os.path.join(directory, 'test_PSF.npy'))
     test_coef = np.load(os.path.join(directory, 'test_coef.npy'))
 
-    def show_PSF_multiwave(array, images=5, cmap='hot'):
-        N_waves = array.shape[-1] // 2
-
-        for k in range(images):
-            fig, axes = plt.subplots(2, N_waves)
-            for j in range(N_waves):
-                for i in range(2):
-                    ax = axes[i][j]
-                    idx = i + 2 * j
-                    img = ax.imshow(array[k, :, :, idx], cmap=cmap)
-                    ax.get_xaxis().set_visible(False)
-                    ax.get_yaxis().set_visible(False)
-                    plt.colorbar(img, ax=ax, orientation='horizontal')
-
-    show_PSF_multiwave(test_PSF)
+    utils.show_PSF_multiwave(train_PSF)
     plt.show()
 
     # Train the Calibration Model with the complete Wavelength Datacube
@@ -297,21 +282,24 @@ if __name__ == """__main__""":
 
     ### Results as a function of SNR | N_WAVES 5 | Waves: 1.5 -> 2.0 microns
     # SNR           1 wave          5 waves         delta mean [%]
-    # 100           60.3 +- 8.3     
+    # 100           60.3 +- 8.3     39.2 +- 4.2     21.1
     # 125           53.4 +- 6.9     37.4 +- 4.0     16.0
     # 250           34.4 +- 4.2     24.2 +- 2.6     10.2 [29.6%]
     # 500           22.9 +- 2.4     17.0 +- 1.5     5.9
+
+    mu_one_wave = [60.3, 53.4, 34.4, 22.9]
+    std_one_wave = [8.3, 6.9, 4.2, 2.4]
 
     ### ============================================================================================================ ###
     # Does the wavelength range matter?
     # What happens if we use the same number of wavelengths but extend WAVEN longer?
     N_WAVES = 5
-    SNR = 250
+    SNRs = [100, 125, 250, 500]
     long_waves = [1.75, 2.0, 2.25, 2.5]
     mu_long, std_long = [], []
     for wave_N in long_waves:
         _centres = psf.actuator_centres_multiwave(N_actuators=N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC,
-                                                           N_waves=N_WAVES, wave0=WAVE0, waveN=wave_N, wave_ref=WAVE)
+                                                  N_waves=N_WAVES, wave0=WAVE0, waveN=wave_N, wave_ref=WAVE)
 
         _matrices = psf.actuator_matrix_multiwave(centres=_centres, alpha_pc=alpha_pc, rho_aper=RHO_APER,
                                                   rho_obsc=RHO_OBSC, N_waves=N_WAVES, wave0=WAVE0, waveN=wave_N,
@@ -320,20 +308,46 @@ if __name__ == """__main__""":
                                                  wave0=WAVE0, waveN=wave_N, wave_ref=WAVE,
                                                  N_pix=N_PIX, crop_pix=pix, diversity_coef=diversity_defocus)
 
-        train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(_PSFs, N_train, 500,
+        train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(_PSFs, N_train, N_test,
                                                                                   coef_strength, rescale)
 
-        long_calib = calibration.Calibration(PSF_model=_PSFs)
-        long_calib.create_cnn_model(layer_filers, kernel_size, name='LONG', activation='relu')
-        losses = long_calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+        mu_snr, std_snr = [], []
+        for _snr in SNRs:
+            print("\nSNR: ", _snr)
+            long_calib = calibration.Calibration(PSF_model=_PSFs)
+            long_calib.create_cnn_model(layer_filers, kernel_size, name='LONG', activation='relu')
+            losses = long_calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
                                                     N_loops, epochs_loop, verbose=1, batch_size_keras=32,
-                                                    plot_val_loss=False, readout_noise=True, RMS_readout=[1. / SNR],
+                                                    plot_val_loss=False, readout_noise=True, RMS_readout=[1. / _snr],
                                                     readout_copies=readout_copies)
 
-        RMS_evolution, residual = long_calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
-                                                                  readout_noise=True, RMS_readout=1. / SNR)
-        mu_long.append(np.mean(RMS_evolution[-1][-1]))
-        std_long.append(np.std(RMS_evolution[-1][-1]))
+            RMS_evolution, residual = long_calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
+                                                                  readout_noise=True, RMS_readout=1. / _snr)
+            mu_snr.append(np.mean(RMS_evolution[-1][-1]))
+            std_snr.append(np.std(RMS_evolution[-1][-1]))
+        mu_long.append(mu_snr)
+        std_long.append(std_snr)
+
+    MUS_LONG = np.array(mu_long)
+    STD_LONG = np.array(std_long)
+
+    blues = cm.Blues(np.linspace(0.25, 1.0, len(SNRs)))
+    plt.figure()
+    plt.errorbar(SNRs, mu_one_wave, yerr=std_one_wave, color='red', fmt='o', label=r'1 $\lambda$')
+    plt.plot(SNRs, mu_one_wave, color='red')
+    for i, wave_N in enumerate(long_waves):
+        mus_waves = mu_long[i]
+        print(mus_waves[-1])
+        std_waves = std_long[i]
+        label = r'%d $\lambda$ [%.2f microns]' % (N_WAVES, wave_N)
+        plt.errorbar(SNRs, mus_waves, yerr=std_waves, color=blues[i], fmt='o', label=label)
+        plt.plot(SNRs, mus_waves, color=blues[i])
+    plt.legend()
+    plt.xlabel('SNR')
+    plt.ylabel('RMS after calibration [nm]')
+    plt.show()
+
+
 
 
 
