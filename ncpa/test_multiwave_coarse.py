@@ -52,7 +52,7 @@ rescale = 0.35                      # Rescale the coefficients to cover a wide r
 layer_filters = [64, 32, 16, 8]     # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
-SNR = 500                           # SNR for the Readout Noise
+SNR = 125                           # SNR for the Readout Noise
 N_loops, epochs_loop = 2, 5         # How many times to loop over the training
 readout_copies = 2                  # How many copies with Readout Noise to use
 N_iter = 4                          # How many iterations to run the calibration (testing)
@@ -89,7 +89,7 @@ if __name__ == """__main__""":
     zernike_fit = calibration.Zernike_fit(PSF_zernike, PSF_actuators, wavelength=WAVE, rho_aper=RHO_APER)
     defocus_zernike = np.zeros((1, zernike_matrix.shape[-1]))
     defocus_zernike[0, 1] = 1.0
-    defocus_actuators = zernike_fit.fit_zernike_wave_to_actuators(defocus_zernike, plot=True, cmap='bwr')[:, 0]
+    defocus_actuators = zernike_fit.fit_zernike_wave_to_actuators(defocus_zernike, plot=False, cmap='bwr')[:, 0]
     diversity_defocus = diversity * defocus_actuators
 
     # Update the Diversity Map on the actuator model so that it matches Defocus
@@ -118,7 +118,7 @@ if __name__ == """__main__""":
     down_test_PSF = PSF_actuators.downsample_datacube(test_PSF)
     utils.plot_images(train_PSF, 1)
     utils.plot_images(down_train_PSF, 1)
-    plt.show()
+    # plt.show()
 
     # Let's see if there's a difference in performance between Scales
     # Fine Scale (5 mas) model
@@ -156,7 +156,7 @@ if __name__ == """__main__""":
     utils.show_wavefronts_grid(PSF_actuators, _residual, RHO_APER,
                          images=(3, 5), cmap='jet', title=None)
 
-    plt.show()
+    # plt.show()
 
     ### ============================================================================================================ ###
     #                                   Multiwavelength!
@@ -188,7 +188,7 @@ if __name__ == """__main__""":
     down_test_PSF_wave = PSFs.downsample_datacube(test_PSF_wave)
     utils.show_PSF_multiwave(train_PSF_wave, 1)
     utils.show_PSF_multiwave(down_train_PSF_wave, 1)
-    plt.show()
+    # plt.show()
 
     ### ============================================================================================================ ###
     # Let's see how the peformance changes with sampling
@@ -255,18 +255,20 @@ if __name__ == """__main__""":
 
     # Show the performance profiles
     # Single Wavelength
-    calib_title = r'Single Wavelength Model | %.2f [microns] | %.1f [mas]' % (WAVE0, SPAX)
+    calib_title = r'Single Wavelength | %.1f [microns] | %.1f [mas]' % (WAVE0, SPAX)
     calib.plot_RMS_evolution(RMS_fine, colormap=cm.Blues, title=calib_title)
 
-    coarse_title = r'Single Wavelength Model | %.2f [microns] | %.1f [mas]' % (WAVE0, 2*SPAX)
+    coarse_title = r'Single Wavelength | %.1f [microns] | %.1f [mas]' % (WAVE0, 2*SPAX)
     coarse_calib.plot_RMS_evolution(RMS_coarse, colormap=cm.Reds, title=coarse_title)
 
     # Multiwavelength
-    fine_wave_title = r'Multiwavelength Model | %.2f - %.2f [microns] %d Waves | %.1f [mas]' % (WAVE0, WAVEN, N_WAVES, SPAX)
+    fine_wave_title = r'Multiwavelength | %.1f - %.1f [microns] %d Waves | %.1f [mas]' % (WAVE0, WAVEN, N_WAVES, SPAX)
     fine_calib_wave.plot_RMS_evolution(RMS_fine_wave, colormap=cm.Blues, title=fine_wave_title)
 
-    coarse_wave_title = r'Multiwavelength Model | %.2f - %.2f [microns] %d Waves | %.1f [mas]' % (WAVE0, WAVEN, N_WAVES, 2*SPAX)
+    coarse_wave_title = r'Multiwavelength | %.1f - %.1f [microns] %d Waves | %.1f [mas]' % (WAVE0, WAVEN, N_WAVES, 2*SPAX)
     coarse_calib_wave.plot_RMS_evolution(RMS_coarse_wave, colormap=cm.Reds, title=coarse_wave_title)
+
+    plt.show()
 
 
 
