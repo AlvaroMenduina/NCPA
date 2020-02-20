@@ -223,7 +223,7 @@ if __name__ == """__main__""":
     encoder_filters, decoder_filters = [256], [256]
     calib_ae = calibration.CalibrationAutoencoder(PSF_zernike, N_autoencoders, encoder_filters, decoder_filters,
                                                   kernel_size, name="AE", activation='relu', loss='binary_crossentropy',
-                                                  load_directory=None)
+                                                  load_directory=directory)
     N_train = 10000
     N_test = 1000
     images_ae, coeffs_ae = calib_ae.generate_datasets_autoencoder(N_train, N_test, coef_ae, rescale)
@@ -234,9 +234,14 @@ if __name__ == """__main__""":
 
     plt.show()
 
-    calib_ae.train_autoencoder_models(datasets=images_ae, N_train=N_train, N_test=N_test, epochs=2,
+    calib_ae.train_autoencoder_models(datasets=images_ae, N_train=N_train, N_test=N_test,
+                                      N_loops=5, epochs_per_loop=5,
+                                      readout_noise=True, readout_copies=2, RMS_readout=1./500,
                                       save_directory=directory)
 
-    calib_ae.validation(datasets=images_ae, N_train=N_train, N_test=N_test, k_image=0)
+    calib_ae.get_encoders(encoder_filters)
+    encoded = calib_ae.encoders[0].predict(calib_ae.noise_effects.add_readout_noise(images_ae[0], RMS_READ=1./500))
+
+    calib_ae.validation(datasets=images_ae, N_train=N_train, N_test=N_test, RMS_readout=1./500, k_image=-1)
     plt.show()
 

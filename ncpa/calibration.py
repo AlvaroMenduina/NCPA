@@ -901,20 +901,43 @@ class CalibrationAutoencoder(object):
             self.encoders.append(_encoder)
         return
 
-    def train_autoencoder_models(self, datasets, N_train, N_test, epochs=100, save_directory=None):
+    def train_autoencoder_models(self, datasets, N_train, N_test, N_loops=5 ,epochs_per_loop=100,
+                                 readout_noise=False, readout_copies=2, RMS_readout=1./100,
+                                 save_directory=None):
 
         nominal_dataset = datasets[0]
         self.metrics = []
         for _model, clean_dataset in zip(self.autoencoder_models, datasets[1:]):
             print("Training Autoencoder: ", _model.name)
-            train_noisy = nominal_dataset[:N_train]
-            test_noisy = nominal_dataset[N_train:]
-            train_clean = clean_dataset[:N_train]
-            test_clean = clean_dataset[N_train:]
+            train_before = nominal_dataset[:N_train]
+            test_before = nominal_dataset[N_train:]
+            train_after = clean_dataset[:N_train]
+            test_after = clean_dataset[N_train:]
             _metric = Metrics()
             self.metrics.append(_metric)
-            _model.fit(train_noisy, train_clean, epochs=epochs, shuffle=True,
-                      verbose=1, validation_data=(test_noisy, test_clean), callbacks=[_metric])
+
+            for i_times in range(N_loops):  # Loop over all images N_loops times
+                print("\nIteration %d / %d" % (i_times + 1, N_loops))
+                if readout_noise is True:
+                    _before, _after = [], []
+                    for k in range(readout_copies):
+                        _train_images = self.noise_effects.add_readout_noise(train_before, RMS_READ=RMS_readout)
+                        _before.append(_train_images)
+                        # _train_images = self.noise_effects.add_readout_noise(train_after, RMS_READ=RMS_readout)
+                        _after.append(train_after)
+                    train_before_noisy = np.concatenate(_before, axis=0)
+                    train_after_noisy = np.concatenate(_after, axis=0)
+
+                    test_before_noisy = self.noise_effects.add_readout_noise(test_before, RMS_READ=RMS_readout)
+                    test_after_noisy = test_after
+                else:
+                    train_before_noisy = train_before
+                    train_after_noisy = train_after
+                    test_before_noisy = test_before
+                    test_after_noisy = test_after
+
+                _model.fit(train_before_noisy, train_after_noisy, epochs=epochs_per_loop, shuffle=True,
+                          verbose=1, validation_data=(test_before_noisy, test_after_noisy), callbacks=[_metric])
 
             # Save the models after training
             if save_directory is not None:
@@ -922,10 +945,11 @@ class CalibrationAutoencoder(object):
                 print("Saving Trained Model: ", file_name)
                 _model.save(file_name)
 
-    def validation(self, datasets, N_train, N_test, k_image=0):
+
+    def validation(self, datasets, N_train, N_test, RMS_readout, k_image=0):
         nominal_dataset = datasets[0]
         for _model, clean_dataset in zip(self.autoencoder_models, datasets[1:]):
-            test_noisy = nominal_dataset[N_train:]
+            test_noisy = self.noise_effects.add_readout_noise(nominal_dataset[N_train:], RMS_READ=RMS_readout)
             test_clean = clean_dataset[N_train:]
             guess_clean = _model.predict(test_noisy)
             for _img in [test_noisy[k_image, :, :, 0], test_clean[k_image, :, :, 0], guess_clean[k_image, :, :, 0]]:
