@@ -3,10 +3,11 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import os
 from time import time
+import h5py
 
 import keras
 from keras.layers import Dense, Conv2D, Flatten, Dropout, MaxPooling2D, UpSampling2D, AveragePooling2D
-from keras.models import Sequential
+from keras.models import Sequential, Input, Model, load_model
 from keras import backend as K
 from numpy.linalg import norm as norm
 
@@ -738,19 +739,25 @@ class CalibrationAutoencoder(object):
 
     def __init__(self, PSF_model, N_autoencoders, encoder_filters, decoder_filters,
                  kernel_size, name, activation='relu', loss='binary_crossentropy',
+                 load_directory=None,
                  noise_effects=noise.NoiseEffects()):
 
         self.PSF_model = PSF_model
         self.noise_effects = noise_effects
 
-        # Create the necessary autoencoders
         self.N_autoencoders = N_autoencoders
         self.autoencoder_models = []
-        for k in range(N_autoencoders):
-            print("Creating Autoencoder")
-            self.autoencoder_models.append(self.create_autoencoder_model(encoder_filters, decoder_filters,
-                                                                         kernel_size, name + '_%d' % (k + 1),
-                                                                         activation, loss))
+        if load_directory is None:  # Create the necessary autoencoders
+            for k in range(N_autoencoders):
+                print("Creating Autoencoder")
+                self.autoencoder_models.append(self.create_autoencoder_model(encoder_filters, decoder_filters,
+                                                                             kernel_size, name + '_%d' % (k + 1),
+                                                                             activation, loss))
+        else:   # Load the models
+            for k in range(N_autoencoders):
+                file_name = os.path.join(load_directory, name + '_%d.h5' % (k + 1))
+                print("Loading Trained Model:", file_name)
+                self.autoencoder_models.append(load_model(file_name))
 
     def compute_PSF(self, coefs):
 
@@ -811,17 +818,20 @@ class CalibrationAutoencoder(object):
 
         nominal_dataset = self.compute_PSF(coefs)
         PSF_AE = [nominal_dataset]
+        all_coefs = []
 
         # How to split the aberrations across autoencoders?
         slices_zernike = self.slice_zernike_polynomials()
         print(slices_zernike)
         for _min, _max in utils.pairwise(slices_zernike):
-            sliced_coef = coefs.copy()
-            sliced_coef[:, :_min] *= 0.0    # remove the other coefficients
-            sliced_coef[:, _max:] *= 0.0
-            print(sliced_coef[0])
-            PSF_AE.append(self.compute_PSF(sliced_coef))
-        return PSF_AE, coefs
+            zeroed_coef = coefs.copy()
+            sliced_coef = coefs[:, _min:_max]
+            zeroed_coef[:, :_min] *= 0.0    # remove the other coefficients
+            zeroed_coef[:, _max:] *= 0.0
+            # print(zeroed_coef[0])
+            PSF_AE.append(self.compute_PSF(zeroed_coef))
+            all_coefs.append(sliced_coef)
+        return PSF_AE, all_coefs
 
     def create_autoencoder_model(self, encoder_filters, decoder_filters, kernel_size, name, activation='relu',
                                  loss='binary_crossentropy'):
@@ -866,7 +876,32 @@ class CalibrationAutoencoder(object):
 
         return model
 
-    def train_autoencoder_models(self, datasets, N_train, N_test, epochs=100):
+    def get_encoders(self, encoder_filters):
+
+        try:        # Check whether PSF_model is single wavelength or multiwave
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+        except AttributeError:
+            N_waves = 1
+
+        pix = self.PSF_model.crop_pix
+        input_shape = (pix, pix, 2 * N_waves,)  # Multiple Wavelength Channels
+
+        self.encoders = []
+        for _model in self.autoencoder_models:
+            input_img = Input(shape=input_shape)
+            _input = input_img
+            for k in range(2 * len(encoder_filters)):       # 2x because of the Conv2D + Pooling2D
+                encoded_layer = _model.layers[k]
+                _output = encoded_layer(_input)
+                _input = _output
+
+            _encoder = Model(input_img, _input)
+            _encoder.summary()
+            self.encoders.append(_encoder)
+        return
+
+    def train_autoencoder_models(self, datasets, N_train, N_test, epochs=100, save_directory=None):
 
         nominal_dataset = datasets[0]
         self.metrics = []
@@ -880,6 +915,12 @@ class CalibrationAutoencoder(object):
             self.metrics.append(_metric)
             _model.fit(train_noisy, train_clean, epochs=epochs, shuffle=True,
                       verbose=1, validation_data=(test_noisy, test_clean), callbacks=[_metric])
+
+            # Save the models after training
+            if save_directory is not None:
+                file_name = os.path.join(save_directory, _model.name + '.h5')
+                print("Saving Trained Model: ", file_name)
+                _model.save(file_name)
 
     def validation(self, datasets, N_train, N_test, k_image=0):
         nominal_dataset = datasets[0]

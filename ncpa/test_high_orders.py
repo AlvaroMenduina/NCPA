@@ -220,12 +220,13 @@ if __name__ == """__main__""":
 
     coef_ae = 0.20
     N_autoencoders = 2
-    encoder_filters, decoder_filters = [128], [128]
+    encoder_filters, decoder_filters = [256], [256]
     calib_ae = calibration.CalibrationAutoencoder(PSF_zernike, N_autoencoders, encoder_filters, decoder_filters,
-                                                  kernel_size, name="AE", activation='relu', loss='binary_crossentropy')
-    N_train = 20000
+                                                  kernel_size, name="AE", activation='relu', loss='binary_crossentropy',
+                                                  load_directory=None)
+    N_train = 10000
     N_test = 1000
-    images_ae, coef_ae = calib_ae.generate_datasets_autoencoder(N_train, N_test, coef_ae, rescale)
+    images_ae, coeffs_ae = calib_ae.generate_datasets_autoencoder(N_train, N_test, coef_ae, rescale)
     for images in images_ae:
         plt.figure()
         plt.imshow(images[0, :, :, 1])
@@ -233,7 +234,8 @@ if __name__ == """__main__""":
 
     plt.show()
 
-    calib_ae.train_autoencoder_models(datasets=images_ae, N_train=N_train, N_test=N_test, epochs=500)
+    calib_ae.train_autoencoder_models(datasets=images_ae, N_train=N_train, N_test=N_test, epochs=2,
+                                      save_directory=directory)
 
     calib_ae.validation(datasets=images_ae, N_train=N_train, N_test=N_test, k_image=0)
     plt.show()
