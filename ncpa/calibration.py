@@ -4,12 +4,15 @@ import matplotlib.cm as cm
 import os
 from time import time
 
-from keras.layers import Dense, Conv2D, Flatten, Dropout
+import keras
+from keras.layers import Dense, Conv2D, Flatten, Dropout, MaxPooling2D, UpSampling2D, AveragePooling2D
 from keras.models import Sequential
 from keras import backend as K
 from numpy.linalg import norm as norm
 
 import noise
+import zernike
+import utils
 
 
 def create_cnn_model(layer_filers, kernel_size, input_shape, N_classes, name, activation='relu'):
@@ -731,7 +734,181 @@ class CalibrationEnsemble(Calibration):
 
         return RMS_evolution, final_residuals
 
+class CalibrationAutoencoder(object):
 
+    def __init__(self, PSF_model, N_autoencoders, encoder_filters, decoder_filters,
+                 kernel_size, name, activation='relu', loss='binary_crossentropy',
+                 noise_effects=noise.NoiseEffects()):
+
+        self.PSF_model = PSF_model
+        self.noise_effects = noise_effects
+
+        # Create the necessary autoencoders
+        self.N_autoencoders = N_autoencoders
+        self.autoencoder_models = []
+        for k in range(N_autoencoders):
+            print("Creating Autoencoder")
+            self.autoencoder_models.append(self.create_autoencoder_model(encoder_filters, decoder_filters,
+                                                                         kernel_size, name + '_%d' % (k + 1),
+                                                                         activation, loss))
+
+    def compute_PSF(self, coefs):
+
+        try:        # Check whether PSF_model is single wavelength or multiwave
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+        except AttributeError:
+            N_waves = 1
+
+        pix = self.PSF_model.crop_pix
+        N_samples = coefs.shape[0]
+        dataset = np.empty((N_samples, pix, pix, 2 * N_waves))
+
+        print("\nGenerating datasets: %d PSF images" % N_samples)
+        if N_waves == 1:
+            for i in range(N_samples):
+
+                im0, _s = self.PSF_model.compute_PSF(coefs[i])
+                dataset[i, :, :, 0] = im0
+
+                im_foc, _s = self.PSF_model.compute_PSF(coefs[i], diversity=True)
+                dataset[i, :, :, 1] = im_foc
+
+                if i % 500 == 0:
+                    print(i)
+        return dataset
+
+    def slice_zernike_polynomials(self):
+
+
+        N_coef = self.PSF_model.N_coef
+        print("\nDividing %d Zernike polynomials among %d autoencoders" % (N_coef, self.N_autoencoders))
+        zernike_dict = zernike.triangular_numbers(N_levels=20)
+        total_poly = np.array([zernike_dict[key] - 3 for key in np.arange(3, 21)])
+        # max_level = np.argwhere(total_poly == N_coef)[0][0]
+        frac = [x / self.N_autoencoders for x in np.arange(1, self.N_autoencoders)]
+        i_cut = [np.argmin(np.abs(total_poly - f * N_coef)) for f in frac]
+        slices = [0]
+        for i in i_cut:
+            print("Cutting at Zernike levels: ", i)
+            print("Total polynomials up to that level: ", total_poly[i])
+            slices.append(total_poly[i])
+        slices.append(N_coef)
+        return slices
+
+    def generate_datasets_autoencoder(self, N_train, N_test, coef_strength, rescale):
+
+
+        N_coef = self.PSF_model.N_coef
+        N_samples = N_train + N_test
+
+        coefs = coef_strength * np.random.uniform(low=-1, high=1, size=(N_samples, N_coef))
+        # Rescale the coefficients to cover a wider range of RMS (so we can iterate)
+        rescale_train = np.linspace(1.0, rescale, N_train)
+        rescale_test = np.linspace(1.0, 0.5, N_test)
+        rescale_coef = np.concatenate([rescale_train, rescale_test])
+        coefs *= rescale_coef[:, np.newaxis]
+
+        nominal_dataset = self.compute_PSF(coefs)
+        PSF_AE = [nominal_dataset]
+
+        # How to split the aberrations across autoencoders?
+        slices_zernike = self.slice_zernike_polynomials()
+        print(slices_zernike)
+        for _min, _max in utils.pairwise(slices_zernike):
+            sliced_coef = coefs.copy()
+            sliced_coef[:, :_min] *= 0.0    # remove the other coefficients
+            sliced_coef[:, _max:] *= 0.0
+            print(sliced_coef[0])
+            PSF_AE.append(self.compute_PSF(sliced_coef))
+        return PSF_AE, coefs
+
+    def create_autoencoder_model(self, encoder_filters, decoder_filters, kernel_size, name, activation='relu',
+                                 loss='binary_crossentropy'):
+        """
+
+        :param encoder_filters:
+        :param decoder_filters:
+        :param kernel_size:
+        :param name:
+        :param activation:
+        :return:
+        """
+
+        try:        # Check whether PSF_model is single wavelength or multiwave
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+        except AttributeError:
+            N_waves = 1
+
+        pix = self.PSF_model.crop_pix
+        input_shape = (pix, pix, 2 * N_waves,)  # Multiple Wavelength Channels
+
+        model = Sequential()
+        model.name = name
+        # Encoder Part
+        model.add(Conv2D(encoder_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
+                         activation=activation, input_shape=input_shape, padding='same'))
+        # model.add(MaxPooling2D(pool_size=(2, 2)))
+        model.add(AveragePooling2D(pool_size=(2, 2)))
+        for N_filters in encoder_filters[1:]:
+            model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation, padding='same'))
+            # model.add(MaxPooling2D(pool_size=(2, 2)))
+            model.add(AveragePooling2D(pool_size=(2, 2)))
+
+        # Decoder Part
+        for N_filters in decoder_filters:
+            model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation, padding='same'))
+            model.add(UpSampling2D((2, 2)))
+        model.add(Conv2D(2 * N_waves, (kernel_size, kernel_size), activation='sigmoid', padding='same'))
+        model.summary()
+        model.compile(optimizer='adam', loss=loss)
+
+        return model
+
+    def train_autoencoder_models(self, datasets, N_train, N_test, epochs=100):
+
+        nominal_dataset = datasets[0]
+        self.metrics = []
+        for _model, clean_dataset in zip(self.autoencoder_models, datasets[1:]):
+            print("Training Autoencoder: ", _model.name)
+            train_noisy = nominal_dataset[:N_train]
+            test_noisy = nominal_dataset[N_train:]
+            train_clean = clean_dataset[:N_train]
+            test_clean = clean_dataset[N_train:]
+            _metric = Metrics()
+            self.metrics.append(_metric)
+            _model.fit(train_noisy, train_clean, epochs=epochs, shuffle=True,
+                      verbose=1, validation_data=(test_noisy, test_clean), callbacks=[_metric])
+
+    def validation(self, datasets, N_train, N_test, k_image=0):
+        nominal_dataset = datasets[0]
+        for _model, clean_dataset in zip(self.autoencoder_models, datasets[1:]):
+            test_noisy = nominal_dataset[N_train:]
+            test_clean = clean_dataset[N_train:]
+            guess_clean = _model.predict(test_noisy)
+            for _img in [test_noisy[k_image, :, :, 0], test_clean[k_image, :, :, 0], guess_clean[k_image, :, :, 0]]:
+                plt.figure()
+                plt.imshow(_img, cmap='hot')
+                plt.colorbar()
+
+            for _img in [test_noisy[k_image, :, :, 1], test_clean[k_image, :, :, 1], guess_clean[k_image, :, :, 1]]:
+                plt.figure()
+                plt.imshow(_img, cmap='hot')
+                plt.colorbar()
+
+class Metrics(keras.callbacks.Callback):
+    def on_train_begin(self, logs={}):
+        self.validation_loss = []
+
+    def on_epoch_end(self, epoch, logs={}):
+        guess_clean = self.model.predict(self.validation_data[0])
+        true_clean = self.validation_data[1]
+        MSE = np.mean(np.sum((guess_clean - true_clean)**2, axis=(1, 2, 3)), axis=0)
+        print(MSE)
+        self.validation_loss.append(MSE)
+
+        return
 
 class Zernike_fit(object):
 
