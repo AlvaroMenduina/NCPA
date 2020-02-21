@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import os
 from time import time
+import copy
 import h5py
 
 import keras
@@ -741,6 +742,42 @@ class CalibrationAutoencoder(object):
                  kernel_size, name, activation='relu', loss='binary_crossentropy',
                  load_directory=None,
                  noise_effects=noise.NoiseEffects()):
+        """
+        Object for Autoencoder-based Calibration
+
+        Rationale: if we want to calibrate many aberrrations (~100 Zernike polynomials) we might run into trouble
+        the calibration networks start to struggle in that regime. One possible alternative is to split the
+        calibration task among multiple networks, each trained on a subset of Zernike polynomials.
+        For example, 2 networks: one trained to identify low order aberrations, one trained to identify high order
+        In that situation, if we show those networks the whole PSF with all types of aberrations, we can have
+        feature contamination issues: i.e., the network trained to recognize low orders gets confused by the
+        presence of high order features in the PSF images.
+        We solve that by using Autoencoders to "denoise" the images. One Autoencoder would look at the PSF with
+        all kinds of aberrations (high and low) and "clean" the image by removing a particular set of features
+
+                         _____ Autoencoder LOW ----> [Clean Image] 1  ----> || Calibration || ---> Low Order Coeff
+                        |                            # No High Orders
+                        |
+        |PSF image| -----
+                        |
+                        |_____Autoencoder HIGH ----> [Clean Image] 2  ----> || Calibration || ---> High Order Coeff
+                                                     # No Low Orders
+
+        We can then use the clean images to calibrate the subset of aberrations, without worrying about contamination
+
+        Parameters
+
+        :param PSF_model: PSF model to generate the images
+        :param N_autoencoders: How many Autoencoders we will use to split the calibration
+        :param encoder_filters: list containing the N filters for the Encoder section of the Autoencoder
+        :param decoder_filters: list containing the N filters for the Decoder section of the Autoencoder
+        :param kernel_size: kernel size for filters
+        :param name: (str) name used to identify the Autoencoders
+        :param activation: (str) activation function. Default: ReLu
+        :param loss: (str) loss function for the Autoencoders. Default: Binary Crossentropy
+        :param load_directory: path to load the trained models from
+        :param noise_effects: Noise object to add readout noise to the images
+        """
 
         self.PSF_model = PSF_model
         self.noise_effects = noise_effects
@@ -753,13 +790,22 @@ class CalibrationAutoencoder(object):
                 self.autoencoder_models.append(self.create_autoencoder_model(encoder_filters, decoder_filters,
                                                                              kernel_size, name + '_%d' % (k + 1),
                                                                              activation, loss))
-        else:   # Load the models
+        else:   # Load the pre-trained models
             for k in range(N_autoencoders):
                 file_name = os.path.join(load_directory, name + '_%d.h5' % (k + 1))
                 print("Loading Trained Model:", file_name)
                 self.autoencoder_models.append(load_model(file_name))
 
+        # Get the Encoder part of the Autoencoders
+        self.get_encoders(encoder_filters)
+
     def compute_PSF(self, coefs):
+        """
+        Calculate the PSF images given a set of aberration coefficients
+        We use it to generate the training set for the Autoencoder models
+        :param coefs:
+        :return:
+        """
 
         try:        # Check whether PSF_model is single wavelength or multiwave
             N_waves = self.PSF_model.N_waves
@@ -785,18 +831,41 @@ class CalibrationAutoencoder(object):
                     print(i)
         return dataset
 
-    def slice_zernike_polynomials(self):
+    def slice_zernike_polynomials(self, max_level=20):
+        """
+        We need to split the task of estimating the aberrations between N_autoencoders
+        We typically want to do that by Zernike radial levels, i.e. some autoencoders will do low orders
+        and others higher orders. But at the same time, we want to keep an (approximately) constant
+        number of coefficients that each autoencoder has to estimate.
 
+        This is not straightforward because as we go through the Zernike pyramid we have more and more polynomials
+        per row (or radial order). So we have to find a way to split the Zernike polynomials between the autoencoders
+
+        For that purpose, we identify the particular radial orders that divide the total number of polynomials
+        in N_autoencoder groups of approximately the same number, while ensuring we do not mix aberrations of
+        other orders
+
+        At the end we return a list of indices for the model matrix that we can use to slice the zernikes
+        :return:
+        """
 
         N_coef = self.PSF_model.N_coef
         print("\nDividing %d Zernike polynomials among %d autoencoders" % (N_coef, self.N_autoencoders))
-        zernike_dict = zernike.triangular_numbers(N_levels=20)
-        total_poly = np.array([zernike_dict[key] - 3 for key in np.arange(3, 21)])
+        # Create a dictionary that contains the Total Number of Polynomials "up to a Zernike radial order"
+        zernike_dict = zernike.triangular_numbers(N_levels=max_level)
+        # List the TNP
+        total_poly = np.array([zernike_dict[key] - 3 for key in np.arange(3, max_level + 1)])
         # max_level = np.argwhere(total_poly == N_coef)[0][0]
+        # frac contains the fractions we need to divide an interval in N_autoencoder chunks
+        # if N=2 [1/2]
+        # if N=3 [1/3, 2/3]
+        # if N=4 [1/4, 2/4, 3/4] and so on...
         frac = [x / self.N_autoencoders for x in np.arange(1, self.N_autoencoders)]
+        # Find the indices of total_poly that (approximately) split the total number of polynomials by those fractions
         i_cut = [np.argmin(np.abs(total_poly - f * N_coef)) for f in frac]
+        # in other words, i_cut are the particular Zernike radial orders that fulfill our condition
         slices = [0]
-        for i in i_cut:
+        for i in i_cut:     # Create a list of indices to slice the model matrix and zernike coefficients
             print("Cutting at Zernike levels: ", i)
             print("Total polynomials up to that level: ", total_poly[i])
             slices.append(total_poly[i])
@@ -804,11 +873,25 @@ class CalibrationAutoencoder(object):
         return slices
 
     def generate_datasets_autoencoder(self, N_train, N_test, coef_strength, rescale):
+        """
+        The training of the autoencoders requires pairs of "noisy" vs "clean" images
+        For N_autoencoders we need (N_autoendocers + 1) datasets for training because
+        the "noisy" is shared between all autoencoders, as that is the PSF with all types of aberrations
 
+        Here we compute (N_autoendocers + 1) datasets by generating a set of random aberration
+        coefficients, and splitting them according to the slices from self.slice_zernike_polynomials()
+
+        :param N_train:
+        :param N_test:
+        :param coef_strength:
+        :param rescale:
+        :return:
+        """
 
         N_coef = self.PSF_model.N_coef
         N_samples = N_train + N_test
 
+        # Calculate the TOTAL dataset of coefficients (i.e. with ALL aberrations)
         coefs = coef_strength * np.random.uniform(low=-1, high=1, size=(N_samples, N_coef))
         # Rescale the coefficients to cover a wider range of RMS (so we can iterate)
         rescale_train = np.linspace(1.0, rescale, N_train)
@@ -816,9 +899,10 @@ class CalibrationAutoencoder(object):
         rescale_coef = np.concatenate([rescale_train, rescale_test])
         coefs *= rescale_coef[:, np.newaxis]
 
+        # "Noisy" dataset -> PSF images with ALL aberrations
         nominal_dataset = self.compute_PSF(coefs)
         PSF_AE = [nominal_dataset]
-        all_coefs = []
+        all_coefs = [coefs]
 
         # How to split the aberrations across autoencoders?
         slices_zernike = self.slice_zernike_polynomials()
@@ -829,6 +913,7 @@ class CalibrationAutoencoder(object):
             zeroed_coef[:, :_min] *= 0.0    # remove the other coefficients
             zeroed_coef[:, _max:] *= 0.0
             # print(zeroed_coef[0])
+            # In order to reuse the same model to generate all datasets we simply mask [zero] the coefficients
             PSF_AE.append(self.compute_PSF(zeroed_coef))
             all_coefs.append(sliced_coef)
         return PSF_AE, all_coefs
@@ -836,12 +921,13 @@ class CalibrationAutoencoder(object):
     def create_autoencoder_model(self, encoder_filters, decoder_filters, kernel_size, name, activation='relu',
                                  loss='binary_crossentropy'):
         """
-
-        :param encoder_filters:
-        :param decoder_filters:
-        :param kernel_size:
-        :param name:
-        :param activation:
+        Create a list of self.N_autoencoders
+        :param encoder_filters: list containing the N filters for the Encoder section of the Autoencoder
+        :param decoder_filters: list containing the N filters for the Decoder section of the Autoencoder
+        :param kernel_size: kernel size for the filters
+        :param name: (str) name used to identify the Autoencoders
+        :param activation: (str) activation function. Default: ReLu
+        :param loss: (str) loss function. Default: Binary Crossentropy
         :return:
         """
 
@@ -875,31 +961,6 @@ class CalibrationAutoencoder(object):
         model.compile(optimizer='adam', loss=loss)
 
         return model
-
-    def get_encoders(self, encoder_filters):
-
-        try:        # Check whether PSF_model is single wavelength or multiwave
-            N_waves = self.PSF_model.N_waves
-            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
-        except AttributeError:
-            N_waves = 1
-
-        pix = self.PSF_model.crop_pix
-        input_shape = (pix, pix, 2 * N_waves,)  # Multiple Wavelength Channels
-
-        self.encoders = []
-        for _model in self.autoencoder_models:
-            input_img = Input(shape=input_shape)
-            _input = input_img
-            for k in range(2 * len(encoder_filters)):       # 2x because of the Conv2D + Pooling2D
-                encoded_layer = _model.layers[k]
-                _output = encoded_layer(_input)
-                _input = _output
-
-            _encoder = Model(input_img, _input)
-            _encoder.summary()
-            self.encoders.append(_encoder)
-        return
 
     def train_autoencoder_models(self, datasets, N_train, N_test, N_loops=5 ,epochs_per_loop=100,
                                  readout_noise=False, readout_copies=2, RMS_readout=1./100,
@@ -945,6 +1006,144 @@ class CalibrationAutoencoder(object):
                 print("Saving Trained Model: ", file_name)
                 _model.save(file_name)
 
+    def get_encoders(self, encoder_filters):
+        """
+        It is sometimes interesting to look at the Encoded images
+        to understand how the Autoencoder compresses information
+
+        For that purpose we can extract the Encoder part of the Autoencoder
+        and generate a model that takes the noisy images as input and
+        outputs the encoded arrays
+        :param encoder_filters:
+        :return:
+        """
+
+        try:  # Check whether PSF_model is single wavelength or multiwave
+            N_waves = self.PSF_model.N_waves
+            print("Multiwavelength Model | N_WAVES: %d" % N_waves)
+        except AttributeError:
+            N_waves = 1
+
+        pix = self.PSF_model.crop_pix
+        input_shape = (pix, pix, 2 * N_waves,)  # Multiple Wavelength Channels
+
+        self.encoders = []
+        for _model in self.autoencoder_models:
+            print("\nExtracting the Encoder part of the Autoencoder")
+            input_img = Input(shape=input_shape)
+            _input = input_img
+            for k in range(2 * len(encoder_filters)):  # 2x because of the Conv2D + Pooling2D
+                encoded_layer = _model.layers[k]
+                _output = encoded_layer(_input)
+                _input = _output
+
+            _encoder = Model(input_img, _input)
+            _encoder.summary()
+            self.encoders.append(_encoder)
+        return
+
+    def create_calibration_models(self, layer_filters, kernel_size, name, activation='relu', load_directory=None):
+        """
+        The Autoencoders are in charge of "denoising" the PSF images to avoid feature contamination
+        but do not provide any estimation of the aberrations
+
+        For the proper calibration, we need to generate Calibration Models and train them with the
+        output of the Autoencoders, the "clean" images
+
+        We can load pre-trained models to save time
+        :param layer_filters:
+        :param kernel_size:
+        :param name:
+        :param activation:
+        :param load_directory: path where the pre-trained models are stored. Default: None leads to training new models
+        :return:
+        """
+
+
+        slices_zernike = self.slice_zernike_polynomials()      # How to split the Model Matrix across autoencoders?
+        self.calibration_models = []
+        for i, (_min, _max) in enumerate(utils.pairwise(slices_zernike)):
+            print("Creating calibration network")
+
+            # Copy the PSF model
+            _PSF_copy = copy.deepcopy(self.PSF_model)
+            N_zern = _max - _min                # How many Zernikes is this Autoencoder in charge of?
+            _PSF_copy.N_coef = N_zern
+            _PSF_copy.model_matrix = _PSF_copy.model_matrix[:, :, _min:_max]        # Slice the Model Matrix
+            _PSF_copy.model_matrix_flat = _PSF_copy.model_matrix_flat[:, _min:_max]      # Slice the Model Matrix flat
+            print(_PSF_copy.model_matrix_flat.shape)
+            _calib = Calibration(PSF_model=_PSF_copy)
+            if load_directory is None:  # Create the Models
+                _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1), activation=activation)
+            else:  # Load the pre-trained models
+                file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                print("Loading Trained Model:", file_name)
+                _calib.cnn_model = load_model(file_name)
+            self.calibration_models.append(_calib)
+
+
+    def train_calibration_models(self, images, coefs, N_train, N_test, N_loops, epochs_loop, verbose, batch_size_keras,
+                                 plot_val_loss, readout_noise, RMS_readout, readout_copies, save_directory=None):
+
+        for i, _model in enumerate(self.calibration_models):
+            _image, _coef = images[i], coefs[i]
+            print("Training Calibration Model: ", _model.cnn_model.name)
+            train_images, test_images = _image[:N_train], _image[N_train:]
+            train_coefs, test_coefs = _coef[:N_train], _coef[N_train:]
+            _model.train_calibration_model(train_images, train_coefs, test_images, test_coefs,
+                                           N_loops=N_loops, epochs_loop=epochs_loop, verbose=verbose,
+                                           batch_size_keras=batch_size_keras, plot_val_loss=plot_val_loss,
+                                           readout_noise=readout_noise, RMS_readout=RMS_readout, readout_copies=readout_copies)
+            if save_directory is not None:
+                file_name = os.path.join(save_directory, _model.cnn_model.name + '.h5')
+                print("Saving Trained Model: ", file_name)
+                _model.cnn_model.save(file_name)
+
+    def calibrate_iterations_autoencoder(self, test_images, test_coefs, N_iter, wavelength,
+                                         readout_noise=False, RMS_readout=None):
+
+        nominal_test_images = test_images[0]
+        nominal_test_coefs = test_coefs[0]
+        before_imgs = nominal_test_images
+        before_coef = nominal_test_coefs
+        print("\nCalibration with Autoencoders")
+        RMS_evolution = []
+        # Dummy Calib is used simply to calculate the evolution of RMS for the whole PSF (all aberrations)
+        dummy_calib = Calibration(PSF_model=self.PSF_model)
+        for k in range(N_iter):
+
+            print("\nIteration #%d" % (k + 1))
+            if readout_noise is True:
+                noisy_before = self.noise_effects.add_readout_noise(before_imgs, RMS_READ=RMS_readout)
+            else:
+                noisy_before = before_imgs
+
+            guess_total = []
+            for i in range(self.N_autoencoders):
+                # (1) We clean the images with the Autoencoder
+                print("Cleaning PSF images with Autoencoder: ", self.autoencoder_models[i].name)
+                clean_imgs = self.autoencoder_models[i].predict(noisy_before)
+                # (2) We estimate the aberrations with the Calibration Model
+                print("Estimating aberrations with Calibration Model: ", self.calibration_models[i].cnn_model.name)
+                guess_coef = self.calibration_models[i].cnn_model.predict(clean_imgs)
+                guess_total.append(guess_coef)
+            # (3) We join the estimations of all Autoencoders
+            guess_total = np.concatenate(guess_total, axis=-1)
+            print(before_coef[0])
+            print(guess_total[0])
+            residual = before_coef - guess_total
+            print(norm(before_coef))
+            print(norm(residual))
+
+            rms_before, rms_after = dummy_calib.calculate_RMS(before_coef, residual, wavelength)
+            rms_pair = [rms_before, rms_after]
+            RMS_evolution.append(rms_pair)
+
+            new_images = self.compute_PSF(residual)
+            before_imgs = new_images
+            before_coef = residual
+
+        return RMS_evolution, residual
 
     def validation(self, datasets, N_train, N_test, RMS_readout, k_image=0):
         nominal_dataset = datasets[0]
