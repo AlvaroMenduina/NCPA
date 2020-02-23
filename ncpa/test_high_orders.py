@@ -187,9 +187,9 @@ if __name__ == """__main__""":
     #                                  AUTOENCODERS
     ### ============================================================================================================ ###
 
-    zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=14, rho_aper=RHO_APER,
+    zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=13, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
-                                                                          N_PIX=N_PIX, radial_oversize=1.1)
+                                                                          N_PIX=N_PIX, radial_oversize=1.05)
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
     N_zern = zernike_matrix.shape[-1]
     print("Using a total of %d Zernike polynomials" % N_zern)  # Total number of polynomials
@@ -201,13 +201,13 @@ if __name__ == """__main__""":
 
     coef_ae = 0.15
     N_autoencoders = 2
-    encoder_filters, decoder_filters = [256], [256]
+    encoder_filters, decoder_filters = [64, 32], [32, 64]
     calib_ae = calibration.CalibrationAutoencoder(PSF_zernike, N_autoencoders, encoder_filters, decoder_filters,
                                                   kernel_size, name="AE", activation='relu', loss='binary_crossentropy',
                                                   load_directory=None)
     N_train = 25000
     N_test = 1000
-    SNR = 500
+    SNR = 750
 
     # Generate the images [noisy, clean_1, ..., clean_N_autoencoders] and coefficients
     images_ae, coeffs_ae = calib_ae.generate_datasets_autoencoder(N_train, N_test, coef_ae, rescale)
@@ -234,38 +234,91 @@ if __name__ == """__main__""":
     # Train the AUTOENCODERS
     calib_ae.train_autoencoder_models(datasets=_images, N_train=N_train, N_test=N_test,
                                       N_loops=5, epochs_per_loop=5,
-                                      readout_noise=True, readout_copies=2, RMS_readout=1./SNR,
+                                      readout_noise=True, readout_copies=5, RMS_readout=1./SNR,
                                       save_directory=directory)
 
     # Clean the training images with the AUTOENCODERS to use them as training for the CALIBRATION model
-    data_images = []
-    for i in range(N_autoencoders):
+    copies = 1      # Introduce multiple copies for robustness
+    data_images_copies, coeff_copies = [], []
+    for ii in range(N_autoencoders):
         clean = _images[0]
-        noisy = calib_ae.noise_effects.add_readout_noise(clean, RMS_READ=1./SNR)
-        predicted = calib_ae.autoencoder_models[i].predict(noisy)
-        data_images.append(predicted)
+        truth = _images[ii + 1]
+        _predict, _coef = [], []
+        for _i in range(copies):
+            noisy = calib_ae.noise_effects.add_readout_noise(clean, RMS_READ=1./SNR)
+            __predict = calib_ae.autoencoder_models[ii].predict(noisy)
+            _predict.append(__predict)
+            _coef.append(_coefs[ii + 1])
+        data_images_copies.append(np.concatenate(_predict, axis=0))
+        coeff_copies.append(np.concatenate(_coef, axis=0))
+
+        list_images = [noisy, truth, __predict]
+        list_names = ['Noisy', 'Clean Truth', 'Clean Guess']
+        list_foc = ['_Nom', '_Foc']
+
+        # show the performance
+        for k in range(5):
+            fig, axes = plt.subplots(2, 3)
+            for i in range(2):
+                for j in range(3):
+                    idx = 3*i + j
+                    # print(idx)
+                    ax = axes[i][j]
+                    _array = list_images[j]
+                    img = ax.imshow(_array[k, :, :, i], cmap='hot')
+                    ax.get_xaxis().set_visible(False)
+                    ax.get_yaxis().set_visible(False)
+                    plt.colorbar(img, ax=ax, orientation='horizontal')
+                    ax.set_title(list_names[j] + list_foc[i] + '_AE_%d' % (ii + 1))
+    plt.show()
 
     # Train the CALIBRATION models
-    calib_ae.create_calibration_models(layer_filters=[64, 32, 16, 8], kernel_size=kernel_size,
-                                       name='CALIB', activation='relu', load_directory=None)
+    calib_ae.create_calibration_models(layer_filters=[64, 32], kernel_size=kernel_size,
+                                       name='CALIB', activation='relu', mode='Encoded', load_directory=directory)
 
     # We shouldn't add Readout Noise because the Autoencoders already see the Noisy Images!!
     # and supposedly clean them too
-    calib_ae.train_calibration_models(data_images, coeffs_ae[1:], N_train, N_test,
+
+    # if Encoded, we have to encode the data_images_copies
+    encoded_images = []
+    for i in range(N_autoencoders):
+        noisyy = _images[0]
+        noisyy = calib_ae.noise_effects.add_readout_noise(noisyy, RMS_READ=1./SNR)
+        encoded_images.append(calib_ae.encoders[i].predict(noisyy))
+
+    calib_ae.train_calibration_models(encoded_images, coeff_copies, copies*N_train, copies*N_test,
                                       N_loops=3, epochs_loop=epochs_loop, verbose=1, batch_size_keras=32,
                                       plot_val_loss=False, readout_noise=False, RMS_readout=None, readout_copies=None,
                                       save_directory=directory)
 
 
     # Extract the Test Sets
-    _cut_coef = [c[N_train:] for c in coeffs_ae]
-    all_coef = [np.concatenate(_cut_coef, axis=-1)]
-    all_coef = all_coef + _cut_coef
+    _cut_coef = [c[N_train:] for c in coeff_copies]
+    # all_coef = [np.concatenate(_cut_coef, axis=-1)]
     test_images = [img[N_train:] for img in _images]
     # Iterate over the calibration
-    RMS_evo_ae, residual_ae = calib_ae.calibrate_iterations_autoencoder(test_images=test_images, test_coefs=all_coef,
+    RMS_evo_ae, residual_ae = calib_ae.calibrate_iterations_autoencoder(test_images=test_images, test_coefs=_cut_coef,
                                                                         N_iter=3, wavelength=WAVE,
-                                                                        readout_noise=True, RMS_readout=1./SNR)
+                                                                        readout_noise=True, RMS_readout=1./SNR,
+                                                                        mode='Encoded')
+
+    guess = calib_ae.calibration_models[1].cnn_model.predict(test_images[2])
+
+    fig, axes = plt.subplots(7, 7)
+    for i in range(7):
+        for j in range(7):
+            idx = 7 * i + j
+            # print(idx)
+            ax = axes[i][j]
+            _array = PSF_zernike.model_matrix[:, :, 52 + idx]
+            img = ax.imshow(_array, cmap='jet', extent=[-1, 1, -1, 1])
+            ax.set_xlim([-RHO_APER, RHO_APER])
+            ax.set_ylim([-RHO_APER, RHO_APER])
+            ax.get_xaxis().set_visible(False)
+            ax.get_yaxis().set_visible(False)
+    plt.show()
+            # plt.colorbar(img, ax=ax, orientation='horizontal')
+
 
 
 

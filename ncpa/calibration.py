@@ -1042,7 +1042,8 @@ class CalibrationAutoencoder(object):
             self.encoders.append(_encoder)
         return
 
-    def create_calibration_models(self, layer_filters, kernel_size, name, activation='relu', load_directory=None):
+    def create_calibration_models(self, layer_filters, kernel_size, name, activation='relu',
+                                  mode='Decoded', load_directory=None):
         """
         The Autoencoders are in charge of "denoising" the PSF images to avoid feature contamination
         but do not provide any estimation of the aberrations
@@ -1072,15 +1073,49 @@ class CalibrationAutoencoder(object):
             _PSF_copy.model_matrix = _PSF_copy.model_matrix[:, :, _min:_max]        # Slice the Model Matrix
             _PSF_copy.model_matrix_flat = _PSF_copy.model_matrix_flat[:, _min:_max]      # Slice the Model Matrix flat
             print(_PSF_copy.model_matrix_flat.shape)
-            _calib = Calibration(PSF_model=_PSF_copy)
-            if load_directory is None:  # Create the Models
-                _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1), activation=activation)
-            else:  # Load the pre-trained models
-                file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
-                print("Loading Trained Model:", file_name)
-                _calib.cnn_model = load_model(file_name)
+
+            if mode == 'Encoded':
+                # Find out what is the output shape of the Encoder
+                encoder_shape = self.encoders[0].layers[-1].output_shape
+                _crop = encoder_shape[1]
+                _channels = encoder_shape[-1]
+
+                crop_copy = _PSF_copy.crop_pix
+                # Force the shapes for the input of the Calibration Models
+                _PSF_copy.crop_pix = _crop
+                _PSF_copy.N_waves = _channels // 2
+
+                _calib = Calibration(PSF_model=_PSF_copy)
+
+                if load_directory is None:  # Create the Models
+
+                    _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                            activation=activation)
+                else:  # Load the pre-trained models
+                    file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                    print("Loading Trained Model:", file_name)
+                    _calib.cnn_model = load_model(file_name)
+
+                # Restore the values to properly compute the PSF
+                _PSF_copy.crop_pix = crop_copy
+                _PSF_copy.N_waves = 1
+
+            elif mode == 'Decoded': # We work with the same dimensions. Do nothing
+
+                _calib = Calibration(PSF_model=_PSF_copy)
+
+                if load_directory is None:  # Create the Models
+
+                    _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                            activation=activation)
+                else:  # Load the pre-trained models
+                    file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                    print("Loading Trained Model:", file_name)
+                    _calib.cnn_model = load_model(file_name)
+
             self.calibration_models.append(_calib)
 
+        return
 
     def train_calibration_models(self, images, coefs, N_train, N_test, N_loops, epochs_loop, verbose, batch_size_keras,
                                  plot_val_loss, readout_noise, RMS_readout, readout_copies, save_directory=None):
@@ -1100,7 +1135,7 @@ class CalibrationAutoencoder(object):
                 _model.cnn_model.save(file_name)
 
     def calibrate_iterations_autoencoder(self, test_images, test_coefs, N_iter, wavelength,
-                                         readout_noise=False, RMS_readout=None):
+                                         readout_noise=False, RMS_readout=None, mode='Decoded'):
 
         nominal_test_images = test_images[0]
         nominal_test_coefs = test_coefs[0]
@@ -1120,9 +1155,14 @@ class CalibrationAutoencoder(object):
 
             guess_total = []
             for i in range(self.N_autoencoders):
-                # (1) We clean the images with the Autoencoder
-                print("Cleaning PSF images with Autoencoder: ", self.autoencoder_models[i].name)
-                clean_imgs = self.autoencoder_models[i].predict(noisy_before)
+
+                if mode == 'Decoded':
+                    # (1) We clean the images with the Autoencoder
+                    print("Cleaning PSF images with Autoencoder: ", self.autoencoder_models[i].name)
+                    clean_imgs = self.autoencoder_models[i].predict(noisy_before)
+                elif mode == 'Encoded':
+                    print("Encoding the PSF images: ")
+                    clean_imgs = self.encoders[i].predict(noisy_before)
                 # (2) We estimate the aberrations with the Calibration Model
                 print("Estimating aberrations with Calibration Model: ", self.calibration_models[i].cnn_model.name)
                 guess_coef = self.calibration_models[i].cnn_model.predict(clean_imgs)
@@ -1138,6 +1178,9 @@ class CalibrationAutoencoder(object):
             rms_before, rms_after = dummy_calib.calculate_RMS(before_coef, residual, wavelength)
             rms_pair = [rms_before, rms_after]
             RMS_evolution.append(rms_pair)
+
+            if k == N_iter - 1:
+                break
 
             new_images = self.compute_PSF(residual)
             before_imgs = new_images
