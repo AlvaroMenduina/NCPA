@@ -1117,8 +1117,108 @@ class CalibrationAutoencoder(object):
 
         return
 
+    def clean_datasets_for_training(self, images, coefs, copies, RMS_readout,
+                                    mode='Decoded', show_images=False):
+        """
+        Using the PSF images, generate the datasets necessary to train the calibration models
+        If mode == 'Decoded'
+            After adding readout noise to the nominal images, we 'predict' with the Autoencoder how the images
+            should look like after cleaning the feature contamination
+        if mode == 'Encoded'
+            After adding readout noise, we 'encode' the images with the Encoder
+
+        :param images: list of (N_autoencoders + 1) with the PSF images
+        :param coefs: list of len (N_autoencoders + 1) with the coefficients for the PSF images and their decoded equivalent
+        :param copies: how many copies with Readout Noise to add
+        :param RMS_readout: RMS (1 / SNR) to use for the copies
+        :param mode: "Decoded" we use the whole Autoencoder or "Encoded" we use only the Encoder part
+        :param show_images: bool whether to show some examples of how the Autoencoder performs
+        :return:
+        """
+
+        print("\nGenerating Datasets to train the Calibration Models")
+
+        # Get the nominal PSF datacube [N_samples, pix, pix, 2] the PSF images with ALL aberrations
+        nominal_imgs = images[0]
+        truth = images[1:]              # What the Autoencoder should recover if it were perfect
+        nominal_coefs = coefs[0]
+
+        images_copies, coefs_copies = [], []
+
+        # Add copies of the Nominal
+        _nom_img, _nom_coef = [], []
+        for n in range(copies):
+            # noisy = self.noise_effects.add_readout_noise(nominal_imgs, RMS_READ=RMS_readout)
+            noisy = nominal_imgs
+            _nom_img.append(noisy)
+            _nom_coef.append(nominal_coefs)
+        images_copies.append(np.concatenate(_nom_img, axis=0))
+        coefs_copies.append(np.concatenate(_nom_coef, axis=0))
+
+        # Add copies of the Clean
+        for k in range(self.N_autoencoders):        # Loop over the Autoencoders
+
+            _predictions, _coef = [], []
+            for i in range(copies):                 # Add multiple copies of Noisy Input, Coefficients, Clean Output
+                noisy = self.noise_effects.add_readout_noise(nominal_imgs, RMS_READ=RMS_readout)
+
+                if mode == 'Decoded':               # We work the whole Autoencoder
+                    print("Cleaning the PSF images with Autoencoder")
+                    clean = self.autoencoder_models[k].predict(noisy)
+                    print(clean.shape)
+                elif mode == 'Encoded':             # We use only the Encoder part
+                    print("Encoding the PSF with Encoder")
+                    clean = self.encoders[k].predict(noisy)
+                    print(clean.shape)
+
+                _predictions.append(clean)
+                _coef.append(coefs[k + 1])
+
+            images_copies.append(np.concatenate(_predictions, axis=0))
+            coefs_copies.append(np.concatenate(_coef, axis=0))
+
+            if show_images:
+
+                list_images = [noisy, truth[k], images_copies[k + 1]]
+                list_names = ['Noisy', 'Clean Truth', 'Clean Guess']
+                list_foc = ['_Nom', '_Foc']
+
+                # show the performance
+                for m in range(5):
+                    fig, axes = plt.subplots(2, 3)
+                    for i in range(2):
+                        for j in range(3):
+                            idx = 3 * i + j
+                            # print(idx)
+                            ax = axes[i][j]
+                            _array = list_images[j]
+                            img = ax.imshow(_array[m, :, :, i], cmap='hot')
+                            ax.get_xaxis().set_visible(False)
+                            ax.get_yaxis().set_visible(False)
+                            plt.colorbar(img, ax=ax, orientation='horizontal')
+                            ax.set_title(list_names[j] + list_foc[i] + '_AE_%d' % (k + 1))
+        return images_copies, coefs_copies
+
+
     def train_calibration_models(self, images, coefs, N_train, N_test, N_loops, epochs_loop, verbose, batch_size_keras,
                                  plot_val_loss, readout_noise, RMS_readout, readout_copies, save_directory=None):
+        """
+
+        :param images: a list of len(N_autoencoders) with the 'clean' PSF images. Output of Autoencoder or Encoder
+        :param coefs: a list of len(N_autoencoders) containing the aberration coefficients for each dataset of PSF images
+        :param N_train: how many images to use for training
+        :param N_test: how many images to use for testing
+        :param N_loops: how many loops to cycle over the complete datasets (to add random instances of readout noise)
+        :param epochs_loop: epochs to train per loop
+        :param verbose: classic Keras verbose option. 1: shows iterations
+        :param batch_size_keras:
+        :param plot_val_loss:
+        :param readout_noise:
+        :param RMS_readout:
+        :param readout_copies:
+        :param save_directory: path where we will save the trained models after finishing
+        :return:
+        """
 
         for i, _model in enumerate(self.calibration_models):
             _image, _coef = images[i], coefs[i]
@@ -1136,6 +1236,26 @@ class CalibrationAutoencoder(object):
 
     def calibrate_iterations_autoencoder(self, test_images, test_coefs, N_iter, wavelength,
                                          readout_noise=False, RMS_readout=None, mode='Decoded'):
+        """
+        Calibrate the aberrations iteratively using the Autoencoder approach
+        At each iteration we add some readout noise and then show the images to each Autoencoder
+        if mode == 'Decoded'
+            each Autoencoder will output a 'clean' PSF image without feature contamination or readout noise
+        if mode == 'Encoded'
+            each Encoder will output an 'encoded' PSF image
+        with such outputs, each Calibration Model will predict the aberrations for the subset of polynomials
+        it is in charge of. After aggregating all predictions into a single guess of size self.PSF_model.N_coef
+        we will apply a correction and update the PSF images
+
+        :param test_images:
+        :param test_coefs:
+        :param N_iter:
+        :param wavelength:
+        :param readout_noise:
+        :param RMS_readout:
+        :param mode:
+        :return:
+        """
 
         nominal_test_images = test_images[0]
         nominal_test_coefs = test_coefs[0]
@@ -1145,7 +1265,11 @@ class CalibrationAutoencoder(object):
         RMS_evolution = []
         # Dummy Calib is used simply to calculate the evolution of RMS for the whole PSF (all aberrations)
         dummy_calib = Calibration(PSF_model=self.PSF_model)
-        for k in range(N_iter):
+
+        # How to split the aberrations across autoencoders?
+        slices_zernike = self.slice_zernike_polynomials()
+
+        for k in range(N_iter):         # Loop over N iterations
 
             print("\nIteration #%d" % (k + 1))
             if readout_noise is True:
@@ -1154,24 +1278,36 @@ class CalibrationAutoencoder(object):
                 noisy_before = before_imgs
 
             guess_total = []
-            for i in range(self.N_autoencoders):
+            for i, (_min, _max) in enumerate(utils.pairwise(slices_zernike)):        # Loop over each Autoencoder
 
-                if mode == 'Decoded':
+                if mode == 'Decoded':       # We work with the complete Autoencoder
                     # (1) We clean the images with the Autoencoder
                     print("Cleaning PSF images with Autoencoder: ", self.autoencoder_models[i].name)
                     clean_imgs = self.autoencoder_models[i].predict(noisy_before)
-                elif mode == 'Encoded':
+
+                elif mode == 'Encoded':     # We use only the Encoder part of the Autoencoder
                     print("Encoding the PSF images: ")
                     clean_imgs = self.encoders[i].predict(noisy_before)
+
                 # (2) We estimate the aberrations with the Calibration Model
                 print("Estimating aberrations with Calibration Model: ", self.calibration_models[i].cnn_model.name)
                 guess_coef = self.calibration_models[i].cnn_model.predict(clean_imgs)
                 guess_total.append(guess_coef)
-            # (3) We join the estimations of all Autoencoders
+
+                # Double Check that the predictions are actually useful
+                sliced_coef = before_coef[:, _min:_max]
+                norm_before = norm(sliced_coef)
+                norm_after = norm(sliced_coef - guess_coef)
+                print("\nLocal Norm Variation")
+                print(norm_before)
+                print(norm_after)
+
+            # (3) We join the estimations of all Autoencoders to correct the aberrations in a single step
             guess_total = np.concatenate(guess_total, axis=-1)
-            print(before_coef[0])
-            print(guess_total[0])
+            # print(before_coef[0])
+            # print(guess_total[0])
             residual = before_coef - guess_total
+            print("\nTotal Norm Variation")
             print(norm(before_coef))
             print(norm(residual))
 
