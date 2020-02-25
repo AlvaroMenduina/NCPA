@@ -1192,7 +1192,7 @@ class CalibrationAutoencoder(object):
                             # print(idx)
                             ax = axes[i][j]
                             _array = list_images[j]
-                            img = ax.imshow(_array[m, :, :, i], cmap='hot')
+                            img = ax.imshow(_array[m*50, :, :, i], cmap='hot')
                             ax.get_xaxis().set_visible(False)
                             ax.get_yaxis().set_visible(False)
                             plt.colorbar(img, ax=ax, orientation='horizontal')
@@ -1264,7 +1264,7 @@ class CalibrationAutoencoder(object):
         print("\nCalibration with Autoencoders")
         RMS_evolution = []
         # Dummy Calib is used simply to calculate the evolution of RMS for the whole PSF (all aberrations)
-        dummy_calib = Calibration(PSF_model=self.PSF_model)
+        self.dummy_calib = Calibration(PSF_model=self.PSF_model)
 
         # How to split the aberrations across autoencoders?
         slices_zernike = self.slice_zernike_polynomials()
@@ -1311,7 +1311,7 @@ class CalibrationAutoencoder(object):
             print(norm(before_coef))
             print(norm(residual))
 
-            rms_before, rms_after = dummy_calib.calculate_RMS(before_coef, residual, wavelength)
+            rms_before, rms_after = self.dummy_calib.calculate_RMS(before_coef, residual, wavelength)
             rms_pair = [rms_before, rms_after]
             RMS_evolution.append(rms_pair)
 

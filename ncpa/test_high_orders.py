@@ -187,7 +187,7 @@ if __name__ == """__main__""":
     #                                  AUTOENCODERS
     ### ============================================================================================================ ###
 
-    zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=11, rho_aper=RHO_APER,
+    zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=14, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
                                                                           N_PIX=N_PIX, radial_oversize=1.05)
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
@@ -199,7 +199,7 @@ if __name__ == """__main__""":
     PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=N_PIX,
                                           crop_pix=pix, diversity_coef=zernike_defocus)
 
-    coef_ae = 0.25
+    coef_ae = 0.20
     N_autoencoders = 2
     encoder_filters, decoder_filters = [64, 32], [32, 64]
     calib_ae = calibration.CalibrationAutoencoder(PSF_zernike, N_autoencoders, encoder_filters, decoder_filters,
@@ -212,12 +212,12 @@ if __name__ == """__main__""":
     # Generate the images [noisy, clean_1, ..., clean_N_autoencoders] and coefficients
     images_ae, coeffs_ae = calib_ae.generate_datasets_autoencoder(N_train, N_test, coef_ae, rescale)
 
-    # # Sanity check on the Strehl ratios
-    # for k in range(N_autoencoders + 1):
-    #     peaks_nom = np.max(images_ae[k][:,:,:,0], axis=(1, 2))
-    #     peaks_foc = np.max(images_ae[k][:,:,:,1], axis=(1, 2))
-    #     print(np.sort(peaks_nom))
-    #     # print(np.sort(peaks_foc))
+    # Sanity check on the Strehl ratios
+    for k in range(N_autoencoders + 1):
+        peaks_nom = np.max(images_ae[k][:,:,:,0], axis=(1, 2))
+        peaks_foc = np.max(images_ae[k][:,:,:,1], axis=(1, 2))
+        print(np.sort(peaks_nom))
+        # print(np.sort(peaks_foc))
 
     # Save the images for later
     for i, (images, coeff) in enumerate(zip(images_ae, coeffs_ae)):
@@ -247,7 +247,7 @@ if __name__ == """__main__""":
     # plt.show()
 
     # Train the CALIBRATION models
-    calib_ae.create_calibration_models(layer_filters=[64, 32, 16, 8], kernel_size=kernel_size,
+    calib_ae.create_calibration_models(layer_filters=[128, 64, 32, 16], kernel_size=kernel_size,
                                        name='CALIB', activation='relu', mode=mode, load_directory=None)
 
     # if Encoded, we have to encode the data_images_copies
@@ -270,8 +270,8 @@ if __name__ == """__main__""":
 
     # Iterate over the calibration
     RMS_evo_ae, residual_ae = calib_ae.calibrate_iterations_autoencoder(test_images=test_images, test_coefs=_cut_coef,
-                                                                        N_iter=3, wavelength=WAVE,
-                                                                        readout_noise=False, RMS_readout=1./SNR,
+                                                                        N_iter=5, wavelength=WAVE,
+                                                                        readout_noise=True, RMS_readout=1./SNR,
                                                                         mode=mode)
 
 
