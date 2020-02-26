@@ -10,6 +10,8 @@ import numpy as np
 from numpy.fft import fft2, fftshift, ifft2
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+from scipy.ndimage import zoom
+from skimage.transform import warp, AffineTransform
 from time import time
 
 import pycuda
@@ -44,6 +46,10 @@ class SlicerModel(object):
     def __init__(self, slicer_options, N_PIX, spaxel_scale, N_waves, wave0, waveN, wave_ref):
 
         self.N_slices = slicer_options["N_slices"]                                          # Number os Slices to use
+
+        # Make sure spaxel_per_slice is even! For sampling purposes
+        if slicer_options["spaxels_per_slice"] % 2 != 0:
+            raise ValueError("Spaxels per slice must be even!")
         self.spaxels_per_slice = slicer_options["spaxels_per_slice"]                        # Size of the slice in Spaxels
         self.pupil_mirror_aperture = slicer_options["pupil_mirror_aperture"]                # Pupil Mirror Aperture
         N_rings = self.spaxels_per_slice / 2
@@ -241,6 +247,40 @@ class SlicerModel(object):
 
         return exit_slits, image
 
+    def downsample_image(self, image, crop=None):
+        """
+        Take the image of the exit slit [N_PIX, N_PIX] and apply the pixelation
+        so that you have 1 spaxel per slice
+
+        It can handle both anamorphic and non-anamorphic cases
+
+        :param image:
+        :return:
+        """
+
+        if self.anamorphic is True:
+
+            x_ratio = 1. / self.spaxels_per_slice
+            y_ratio = 2. / self.spaxels_per_slice
+
+            down_image = zoom(image, zoom=[x_ratio, y_ratio])
+
+            X, Y = down_image.shape
+            if X < Y:
+                down_image = down_image[:, Y // 2 - X // 2: Y // 2 + X // 2]
+
+            if crop is not None:
+                img = utils.crop_array(down_image, crop=crop)
+            else:
+                img = down_image
+
+            return img
+
+        else:
+            x_ratio = 1. / self.spaxels_per_slice
+            down_image = zoom(image, zoom=x_ratio)
+            return
+
     def propagate_gpu_wavelength(self, wavelength, wavefront, N):
         """
         Propagation from Pupil Plane to Exit Slit on the GPU for a single wavelength
@@ -366,14 +406,15 @@ class SlicerModel(object):
 
         return slit
 
-    def propagate_one_wavelength(self, wavelength, wavefront, plot=False):
+    def propagate_one_wavelength(self, wavelength, wavefront, plot=False, silent=False):
         """
         Run the propagation from PUPIL Plane to EXIT SLIT Plane for a given wavelength
         :param wavelength:
         :param wavefront:
         """
 
-        print("\nPropagating Wavelength: %.2f microns" % wavelength)
+        if not silent:
+            print("\nPropagating Wavelength: %.2f microns" % wavelength)
         complex_slicer = self.propagate_pupil_to_slicer(wavelength=wavelength, wavefront=wavefront)
         complex_mirror = self.propagate_slicer_to_pupil_mirror(complex_slicer)
         exit_slits, image_slit = self.propagate_pupil_mirror_to_exit_slit(complex_mirror, wavelength=wavelength)
@@ -461,12 +502,231 @@ class SlicerModel(object):
         return
 
 
+class HARMONI(SlicerModel):
+
+    def __init__(self, N_PIX, pix, N_waves, wave0, waveN, wave_ref, anamorphic):
+
+        self.pix = pix
+        N_slices = 33
+        spaxels_per_slice = 16
+        slice_mas = 7.0
+        spaxel_scale = slice_mas / spaxels_per_slice
+
+        # HARMONI fits approximately 6 rings (at each side) at the Pupil Mirror at 1.5 microns
+        # In Python we have 1/2 spaxels_per_slice rings at each side in the Pupil Mirror arrays
+        N_rings = spaxels_per_slice / 2
+        rings_HARMONI = 6
+        pupil_mirror_aperture = rings_HARMONI / N_rings
+        slicer_options = {"N_slices": N_slices, "spaxels_per_slice": spaxels_per_slice,
+                          "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": anamorphic}
+
+        SlicerModel.__init__(self, slicer_options=slicer_options, N_PIX=N_PIX, spaxel_scale=spaxel_scale,
+                             N_waves=N_waves, wave0=wave0, waveN=waveN, wave_ref=wave_ref)
+
+    def create_actuator_matrices(self, N_act_perD, alpha_pc, plot=False):
+
+        RHO_APER = self.rho_aper
+        RHO_OBSC = self.rho_obsc
+        N_WAVES = self.wave_range.shape[0]
+        WAVE0 = self.wave_range[0]
+        WAVEN = self.wave_range[-1]
+        WAVEREF = self.wave_ref
+
+        N_actuators = int(N_act_perD / RHO_APER)
+
+        centers_multiwave = psf.actuator_centres_multiwave(N_actuators=N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC,
+                                                           N_waves=N_WAVES, wave0=WAVE0, waveN=WAVEN, wave_ref=WAVEREF)
+        self.N_act = len(centers_multiwave[0][0])
+        print("%d Actuators" % self.N_act)
+
+        matrices = psf.actuator_matrix_multiwave(centres=centers_multiwave, alpha_pc=alpha_pc, rho_aper=RHO_APER,
+                                                          rho_obsc=RHO_OBSC, N_waves=N_WAVES, wave0=WAVE0, waveN=WAVEN,
+                                                          wave_ref=WAVEREF, N_PIX=self.N_PIX)
+
+        if self.anamorphic is True:
+            print("Transforming Actuator Matrices to match Anamorphism")
+            # Absolutely key! We need to apply a transformation to the circular actuator matrices, to make them
+            # anamorphic, just like the pupil masks
+
+            sx, sy = 1, 2       # sy = 2 to apply the anamorphic scaling
+            transform = AffineTransform(scale=(sx, sy), translation=(0, -self.N_PIX // 2))
+
+            new_matrices = []
+            for i, wave in enumerate(self.wave_range):   # loop over wavelengths
+                old_matrices = matrices[i]
+                old_actuator = old_matrices[0]
+                print(old_actuator.shape)
+                new_actuator = np.zeros_like(old_actuator)
+                for k in range(self.N_act):
+                    new_actuator[:, :, k] = warp(image=old_actuator[:, :, k], inverse_map=transform)
+                old_matrices[0] = new_actuator
+                pupil_bool = self.pupil_masks[wave].copy().astype(bool)
+                old_matrices[2] = new_actuator[pupil_bool]
+                new_matrices.append(old_matrices)
+        else:
+            new_matrices = matrices
+
+        if plot:
+            for i, wave_r in enumerate(self.waves_ratio):
+                fig = plt.figure()
+                ax = fig.add_subplot(111)
+                circ1 = Circle((0, 0), RHO_APER / wave_r, linestyle='--', fill=None)
+                circ2 = Circle((0, 0), RHO_OBSC / wave_r, linestyle='--', fill=None)
+                ax.add_patch(circ1)
+                ax.add_patch(circ2)
+                for c in centers_multiwave[i][0]:
+                    ax.scatter(c[0], c[1], color='red', s=10)
+                    ax.scatter(c[0], c[1], color='black', s=10)
+                ax.set_aspect('equal')
+                plt.xlim([-1.1*RHO_APER / wave_r, 1.1*RHO_APER / wave_r])
+                plt.ylim([-1.1*RHO_APER / wave_r, 1.1*RHO_APER / wave_r])
+                # plt.title('%d actuators' %N_act)
+                plt.title('Wavelength: %.2f microns' % self.wave_range[i])
+
+        self.actuator_matrices = {}
+        self.actuator_flats = {}
+        for i, wave in enumerate(self.wave_range):
+            self.actuator_matrices[wave] = new_matrices[i][0]
+            self.actuator_flats[wave] = new_matrices[i][2]
+
+        return
+
+    def generate_PSF(self, coef, wavelengths):
+
+        N_samples = coef.shape[0]
+        print("\nGenerating %d PSF images" % N_samples)
+
+        N_channels = len(wavelengths)
+        dataset = np.empty((N_samples, self.pix, self.pix, N_channels))
+        start = time()
+        for k in range(N_samples):
+            for j, wavelength in enumerate(wavelengths):
+                wavefront = np.dot(self.actuator_matrices[wavelength], coef[k])
+                _slicer, _mirror, slit, slits = self.propagate_one_wavelength(wavelength, wavefront, silent=True)
+                img = self.downsample_image(slit, crop=self.pix)
+                dataset[k, :, :, j] = img
+        finish = time()
+        duration = finish - start
+        print("%.2f sec / %.2f sec per PSF" % (duration, duration / N_samples))
+        return dataset
+
+
+
 class SlicerAnalysis(object):
 
     def __init__(self, path_save):
 
         self.path_save = path_save
         return
+
+    def pixelation_central_slice(self, N_slices, spaxels_per_slice, spaxel_mas, rings_we_want, N_PIX,
+                                 N_waves, wave0, waveN, wave_ref, anamorphic=False):
+
+        intensity = []
+        for rings in rings_we_want:
+
+            N_rings = spaxels_per_slice / 2
+            pupil_mirror_aperture = rings / N_rings
+            slicer_options = {"N_slices": N_slices, "spaxels_per_slice": spaxels_per_slice,
+                              "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": anamorphic}
+
+            _slicer = SlicerModel(slicer_options=slicer_options, N_PIX=N_PIX, spaxel_scale=spaxel_mas,
+                                  N_waves=N_waves, wave0=wave0, waveN=waveN, wave_ref=wave_ref)
+
+            intensity_wave = []
+            for wave in _slicer.wave_range:
+
+
+
+                complex_slicer, complex_mirror, exit_slit, slits = _slicer.propagate_one_wavelength(wavelength=wave,
+                                                                                                    wavefront=0)
+
+                print(exit_slit.shape)
+                min_pix = N_PIX//2 - (spaxels_per_slice - 1) // 2
+                max_pix = N_PIX//2 + (spaxels_per_slice - 1) // 2
+
+                sliced = exit_slit[min_pix:max_pix, min_pix:max_pix]
+                print(np.mean(sliced))
+                intensity_wave.append(np.mean(sliced))
+            intensity.append(intensity_wave)
+
+        return intensity
+
+    def pixelation_effect(self, N_slices, spaxels_per_slice, spaxel_mas, rings_we_want, N_PIX,
+                          N_waves, wave0, waveN, wave_ref, anamorphic, crop):
+
+        img_rings, ring_grid = [], []
+        for rings in rings_we_want:
+
+            N_rings = spaxels_per_slice / 2
+            pupil_mirror_aperture = rings / N_rings
+            slicer_options = {"N_slices": N_slices, "spaxels_per_slice": spaxels_per_slice,
+                              "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": anamorphic}
+
+            _slicer = SlicerModel(slicer_options=slicer_options, N_PIX=N_PIX, spaxel_scale=spaxel_mas,
+                                  N_waves=N_waves, wave0=wave0, waveN=waveN, wave_ref=wave_ref)
+
+            imgs_wave = []
+            for wave in _slicer.wave_range:
+
+                complex_slicer, complex_mirror, exit_slit, slits = _slicer.propagate_one_wavelength(wavelength=wave,
+                                                                                                    wavefront=0)
+                img = _slicer.downsample_image(exit_slit, crop=crop)
+
+                print(img.shape)
+                imgs_wave.append(img)
+            wave_grid = np.concatenate(imgs_wave, axis=0)
+            ring_grid.append(wave_grid)
+            img_rings.append(imgs_wave)
+        ring_grid = np.concatenate(ring_grid, axis=1)
+
+        pix_array = np.array(img_rings)         # [N_rings, N_waves, pix1, pix2]
+        for i, wave in enumerate(_slicer.wave_range):
+            N_r = len(rings_we_want)
+            nom_img = pix_array[0, i]
+            PEAK = np.max(nom_img)
+            nom_img /= PEAK
+
+            fig, axes = plt.subplots(1, N_r)
+            ax = axes[0]
+            _image = ax.imshow(nom_img, cmap='hot', extent=[-1, 1, -1, 1])
+            ax.set_title('%.1f microns | %d rings' % (wave, rings_we_want[0]))
+            ax.get_xaxis().set_visible(False)
+            ax.get_yaxis().set_visible(False)
+            plt.colorbar(_image, ax=ax, orientation='horizontal')
+
+            for k in np.arange(1, len(rings_we_want)):
+                ax = axes[k]
+                this_img = pix_array[k, i]
+                this_img /= PEAK
+                residual = this_img - nom_img
+                residual *= 100
+                cm = min(np.min(residual), -np.max(residual))
+                # cm = -20
+                _image = ax.imshow(residual, cmap='bwr', extent=[-1, 1, -1, 1])
+                _image.set_clim(cm, -cm)
+                ax.set_title('%d rings' % (rings_we_want[k]))
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
+                plt.colorbar(_image, ax=ax, orientation='horizontal')
+        plt.show()
+
+
+        # plt.figure()
+        # plt.imshow(ring_grid, cmap='jet', origin='lower', extent=[0, 1, 0, 1])
+        # for i, _ring in enumerate(rings_we_want):
+        #     x = (0.5 + i) / len(rings_we_want) - 0.0025
+        #     plt.text(x=x, y=0.01, s=str(_ring), color='white')
+        #
+        # for j, _wave in enumerate(_slicer.wave_range):
+        #     y = (0.5 + j) / len(_slicer.wave_range) - 0.005
+        #     plt.text(x=0.01, y=y, s=str(_wave) + r' $\mu$m', color='white')
+        # plt.axes().set_aspect(1 / len(rings_we_want))
+        # plt.axes().get_xaxis().set_visible(False)
+        # plt.axes().get_yaxis().set_visible(False)
+
+        return img_rings, pix_array
+
 
     def fancy_grid(self, N_slices, spaxels_per_slice, spaxel_mas, rings_we_want, N_PIX,
                          N_waves, wave0, waveN, wave_ref, anamorphic=False):
@@ -672,6 +932,51 @@ class SlicerPSFGenerator(object):
             dataset = utils.crop_array(dataset, self.pix)
 
         return dataset
+
+
+
+    ### Old Bits
+    #
+    # def downsample_slits_old(self, exit_slits):
+    #
+    #     if self.anamorphic is True:
+    #
+    #         central_pix = self.N_PIX // 2
+    #         pix_per_slice = self.spaxels_per_slice
+    #
+    #         # Average along the slice
+    #         y_pix = self.spaxels_per_slice // 2
+    #         N_y = self.N_PIX // y_pix
+    #
+    #         # TODO: what if N_slices is not odd??
+    #         N_slices_above = (self.N_slices - 1) // 2
+    #         lower_centre = central_pix - N_slices_above * pix_per_slice
+    #         down_slits = []
+    #         for i in range(self.N_slices):
+    #             centre = lower_centre + i * pix_per_slice
+    #             bottom = centre - pix_per_slice // 2
+    #             top = centre + pix_per_slice // 2
+    #             _slit = exit_slits[i]
+    #             sliced_slit = _slit[bottom:top, :]
+    #
+    #             down_slit = []
+    #             for k in range(N_y):
+    #                 bott = k * y_pix
+    #                 topp = (k + 1) * y_pix
+    #                 down_slit.append(np.sum(sliced_slit[:, bott:topp]))
+    #             down_slits.append(down_slit)
+    #
+    #         down_slits = np.stack(down_slits)
+    #         minY = N_y // 2 - (self.N_slices - 1)//2 - 1
+    #         maxY = N_y // 2 + (self.N_slices - 1)//2
+    #         down_slits = down_slits[:, minY:maxY]
+    #
+    #         return down_slits
+    #
+    #     else:
+    #
+    #         down_slits = 0
+    #         return down_slits
 
 
 
