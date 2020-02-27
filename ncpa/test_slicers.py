@@ -6,6 +6,11 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from time import time
 
+import pycuda
+import pycuda.autoinit
+import pycuda.gpuarray as gpuarray
+import pycuda.driver as cuda
+
 import utils
 import slicers
 
@@ -16,77 +21,48 @@ if __name__ == """__main__""":
     plt.rc('font', family='serif')
     plt.rc('text', usetex=False)
 
-    harmoni = slicers.HARMONI(N_PIX=2048, pix=32, N_waves=1, wave0=1.5, waveN=1.5, wave_ref=1.5, anamorphic=True)
-    harmoni.create_actuator_matrices(N_act_perD=6, alpha_pc=10, plot=True)
-
-    harmoni_fake = slicers.HARMONI(N_PIX=2048, pix=32, N_waves=1, wave0=1.5, waveN=1.5, wave_ref=1.5,  anamorphic=False)
-    harmoni_fake.create_actuator_matrices(N_act_perD=6, alpha_pc=10, plot=True)
-
-
-    c = np.random.uniform(-1, 1, size=harmoni.N_act)
-    phase = np.dot(harmoni.actuator_matrices[1.5], c)
-    phase_fake = np.dot(harmoni_fake.actuator_matrices[1.5], c)
-
-    plt.figure()
-    plt.imshow(phase)
-    plt.colorbar()
-
-    plt.figure()
-    plt.imshow(phase_fake)
-    plt.colorbar()
-    plt.show()
-
-    pup = harmoni.actuator_matrices[1.5][:,:,0]
-    plt.imshow(pup)
-    plt.show()
-
-    N_PSF = 10
-    c = 0.25
-    coef = np.random.uniform(low=-c, high=c, size=((N_PSF, harmoni.N_act)))
-    p = harmoni.generate_PSF(coef, wavelengths=[1.5])
-
     # ================================================================================================================ #
     #                                      Speed Comparison on the GPU                                                 #
     # ================================================================================================================ #
 
-    # slicer_options = {"N_slices": 38, "spaxels_per_slice": 11,
-    #                   "pupil_mirror_aperture": 0.85, "anamorphic": True}
-    # N_PIX = 2048
-    # spaxel_mas = 0.25        # to get a decent resolution
-    #
-    # slicer = slicers.SlicerModel(slicer_options=slicer_options, N_PIX=N_PIX, spaxel_scale=spaxel_mas,
-    #                              N_waves=2, wave0=1.5, waveN=2.0, wave_ref=1.5)
+    slicer_options = {"N_slices": 21, "spaxels_per_slice": 32,
+                      "pupil_mirror_aperture": 0.85, "anamorphic": True}
+    N_PIX = 1024
+    spaxel_mas = 0.25        # to get a decent resolution
 
-    # print("\n---------------------------------------------------------------------")
-    # print("Running on the CPU")
-    # N_PSF = 10
-    # cpu_start = time()
-    # for i in range(N_PSF):
-    #     complex_slicer, complex_mirror, exit_slit, slits = slicer.propagate_one_wavelength(wavelength=1.5, wavefront=0, plot=False)
-    # cpu_end = time()
-    # cpu_time = cpu_end - cpu_start
-    #
-    # print("Time to propagate %d PSFs: %.2f seconds" % (N_PSF, cpu_time))
-    # print("Time to propagate 1 PSF (%d slices): %.2f seconds" % (slicer.N_slices, cpu_time / N_PSF))
-    # print("Time to propagate 1 slice: %.2f seconds" % (cpu_time / N_PSF / slicer.N_slices))
+    slicer = slicers.SlicerModel(slicer_options=slicer_options, N_PIX=N_PIX, spaxel_scale=spaxel_mas,
+                                 N_waves=2, wave0=1.5, waveN=2.0, wave_ref=1.5)
 
-    # N_PSF = 10
-    # gpu_start = time()
-    # exit_slits = slicer.propagate_gpu_wavelength(wavelength=1.5, wavefront=0, N=N_PSF)
-    # gpu_end = time()
-    # gpu_time = gpu_end - gpu_start
-    # print("Time to propagate %d PSFs: %.2f seconds" % (N_PSF, gpu_time))
-    # print("Time to propagate 1 PSF (%d slices): %.2f seconds" % (slicer.N_slices, gpu_time / N_PSF))
-    # print("Time to propagate 1 slice: %.2f seconds" % (gpu_time / N_PSF / slicer.N_slices))
-    #
-    # free, total = cuda.mem_get_info()
-    # print("Free: %.2f percent" % (free / total * 100))
-    #
-    # for i in range(N_PSF):
-    #     plt.figure()
-    #     plt.imshow(exit_slits[i])
-    #     plt.colorbar()
-    # plt.show()
+    print("\n---------------------------------------------------------------------")
+    print("Running on the CPU")
+    N_PSF = 10
+    cpu_start = time()
+    for i in range(N_PSF):
+        complex_slicer, complex_mirror, exit_slit, slits = slicer.propagate_one_wavelength(wavelength=1.5, wavefront=0, plot=False)
+    cpu_end = time()
+    cpu_time = cpu_end - cpu_start
+
+    print("Time to propagate %d PSFs: %.2f seconds" % (N_PSF, cpu_time))
+    print("Time to propagate 1 PSF (%d slices): %.2f seconds" % (slicer.N_slices, cpu_time / N_PSF))
+    print("Time to propagate 1 slice: %.2f seconds" % (cpu_time / N_PSF / slicer.N_slices))
+
+    N_PSF = 10
+    gpu_start = time()
+    exit_slits = slicer.propagate_gpu_wavelength(wavelength=1.5, wavefront=np.zeros((N_PIX, N_PIX)), N=N_PSF)
+    gpu_end = time()
+    gpu_time = gpu_end - gpu_start
+    print("Time to propagate %d PSFs: %.2f seconds" % (N_PSF, gpu_time))
+    print("Time to propagate 1 PSF (%d slices): %.2f seconds" % (slicer.N_slices, gpu_time / N_PSF))
+    print("Time to propagate 1 slice: %.2f seconds" % (gpu_time / N_PSF / slicer.N_slices))
+
+    free, total = cuda.mem_get_info()
+    print("Free: %.2f percent" % (free / total * 100))
+
+    plt.figure()
+    plt.imshow(exit_slits[0])
+    plt.colorbar()
+    plt.show()
+
 
     # ================================================================================================================ #
     #                                    HARMONI comparison                                                            #
@@ -155,17 +131,6 @@ if __name__ == """__main__""":
     plt.colorbar()
     plt.show()
 
-    from scipy.ndimage import zoom
-    squeezed = zoom(exit_slit, zoom=[0.25, 0.5])
-
-
-
-
-    new_slits = HARMONI.downsample_slits(slits)
-    plt.figure()
-    plt.imshow(new_slits)
-    plt.show()
-
     # ================================================================================================================ #
     #                                               ANALYSIS                                                           #
     # ================================================================================================================ #
@@ -208,6 +173,60 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
     #                                          PSF Generator                                                           #
     # ================================================================================================================ #
+
+
+
+    # harmoni = slicers.HARMONI(N_PIX=1024, pix=32, N_waves=1, wave0=1.5, waveN=1.5, wave_ref=1.5, anamorphic=True)
+    # harmoni.create_actuator_matrices(N_act_perD=6, alpha_pc=10, plot=True)
+    #
+    # harmoni_fake = slicers.HARMONI(N_PIX=2048, pix=32, N_waves=1, wave0=1.5, waveN=1.5, wave_ref=1.5,  anamorphic=False)
+    # harmoni_fake.create_actuator_matrices(N_act_perD=6, alpha_pc=10, plot=True)
+    #
+    # c = np.random.uniform(-1, 1, size=harmoni.N_act)
+    # phase = np.dot(harmoni.actuator_matrices[1.5], c)
+    # # phase_fake = np.dot(harmoni_fake.actuator_matrices[1.5], c)
+    #
+    # plt.figure()
+    # plt.imshow(phase)
+    # plt.colorbar()
+    #
+    # plt.figure()
+    # plt.imshow(harmoni.pupil_masks[1.5])
+    # plt.colorbar()
+    # plt.show()
+    #
+    # pup = harmoni.actuator_matrices[1.5][:,:,0]
+    # plt.imshow(pup)
+    # plt.show()
+    #
+
+
+    # ================================================================================================================ #
+    #                                         HARMONI Slicer PSFs                                                      #
+    # ================================================================================================================ #
+    diversity = 0.50 * 1.5
+    harmoni = slicers.HARMONI(N_PIX=256, pix=32, N_waves=1, wave0=1.5, waveN=1.5, wave_ref=1.5, anamorphic=True)
+    harmoni.create_actuator_matrices(N_act_perD=10, alpha_pc=10, plot=True)
+    harmoni.define_diversity(diversity)
+
+    # for wave in harmoni.wave_range:
+    #     plt.figure()
+    #     plt.imshow(harmoni.diversities[wave])
+    #     plt.colorbar()
+    # plt.show()
+
+    N_PSF = 5000
+    c = 0.25
+    coef = np.random.uniform(low=-c, high=c, size=((N_PSF, harmoni.N_act)))
+
+    psf_images = harmoni.generate_PSF(coef, wavelengths=[1.5])
+
+    plt.figure()
+    plt.imshow(p[0, :, :, 1])
+    plt.colorbar()
+    plt.show()
+
+
 
 
 

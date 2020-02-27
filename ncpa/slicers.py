@@ -24,6 +24,7 @@ import skcuda.fft as cu_fft
 
 import utils
 import psf
+import calibration
 
 CENTRAL_OBS = 0.30          # ELT central obscuration
 
@@ -508,7 +509,7 @@ class HARMONI(SlicerModel):
 
         self.pix = pix
         N_slices = 33
-        spaxels_per_slice = 16
+        spaxels_per_slice = 2
         slice_mas = 7.0
         spaxel_scale = slice_mas / spaxels_per_slice
 
@@ -543,6 +544,8 @@ class HARMONI(SlicerModel):
                                                           rho_obsc=RHO_OBSC, N_waves=N_WAVES, wave0=WAVE0, waveN=WAVEN,
                                                           wave_ref=WAVEREF, N_PIX=self.N_PIX)
 
+        self.raw_matrices = matrices
+
         if self.anamorphic is True:
             print("Transforming Actuator Matrices to match Anamorphism")
             # Absolutely key! We need to apply a transformation to the circular actuator matrices, to make them
@@ -553,16 +556,13 @@ class HARMONI(SlicerModel):
 
             new_matrices = []
             for i, wave in enumerate(self.wave_range):   # loop over wavelengths
-                old_matrices = matrices[i]
-                old_actuator = old_matrices[0]
+                old_actuator = matrices[i][0].copy()
                 print(old_actuator.shape)
                 new_actuator = np.zeros_like(old_actuator)
                 for k in range(self.N_act):
                     new_actuator[:, :, k] = warp(image=old_actuator[:, :, k], inverse_map=transform)
-                old_matrices[0] = new_actuator
                 pupil_bool = self.pupil_masks[wave].copy().astype(bool)
-                old_matrices[2] = new_actuator[pupil_bool]
-                new_matrices.append(old_matrices)
+                new_matrices.append([new_actuator, pupil_bool, new_actuator[pupil_bool]])
         else:
             new_matrices = matrices
 
@@ -591,25 +591,93 @@ class HARMONI(SlicerModel):
 
         return
 
+    def find_actuator_defocus(self):
+
+        i_ref = np.argwhere(self.wave_range == self.wave_ref)[0][0]
+        PSF_nom = psf.PointSpreadFunction(self.raw_matrices[i_ref], N_pix=self.N_PIX, crop_pix=self.pix,
+                                          diversity_coef=np.zeros(self.N_act))
+
+        # Create a Zernike model so we can mimic the defocus
+        zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=5, rho_aper=self.rho_aper,
+                                                                              rho_obsc=self.rho_obsc,
+                                                                              N_PIX=self.N_PIX, radial_oversize=1.0)
+        zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
+        plt.figure()
+        plt.imshow(pupil_mask_zernike)
+        PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=self.N_PIX,
+                                              crop_pix=self.pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
+
+        # Use Least Squares to find the actuator commands that mimic a Zernike defocus
+        zernike_fit = calibration.Zernike_fit(PSF_zernike, PSF_nom, wavelength=self.wave_ref, rho_aper=self.rho_aper)
+        defocus_zernike = np.zeros((1, zernike_matrix.shape[-1]))
+        defocus_zernike[0, 1] = 1.0
+        defocus_actuators = zernike_fit.fit_zernike_wave_to_actuators(defocus_zernike, plot=True, cmap='bwr')[:, 0]
+
+        # Update the Diversity Map on the actuator model so that it matches Defocus
+        return defocus_actuators
+
+    def define_diversity(self, diversity):
+
+        diversity_coef = diversity * self.find_actuator_defocus()
+
+        # All wavefront are in [microns] already so no need to create multiple copies
+        # for the different wavelengths
+        self.diversities = {}
+        for wave in self.wave_range:
+            self.diversities[wave] = np.dot(self.actuator_matrices[wave], diversity_coef)
+
+        self.define_peaks()
+
+    def define_peaks(self):
+        self.peaks_wavelength = {}
+        coef = np.zeros((1, self.N_act))
+        for wavelength in self.wave_range:
+            data = self.generate_PSF(coef, wavelengths=[wavelength])
+            self.peaks_wavelength[wavelength] = np.max(data[0, :, :, 0])
+        return
+
     def generate_PSF(self, coef, wavelengths):
 
         N_samples = coef.shape[0]
         print("\nGenerating %d PSF images" % N_samples)
 
         N_channels = len(wavelengths)
-        dataset = np.empty((N_samples, self.pix, self.pix, N_channels))
+        dataset = np.empty((N_samples, self.pix, self.pix, 2*N_channels))
         start = time()
         for k in range(N_samples):
             for j, wavelength in enumerate(wavelengths):
+
                 wavefront = np.dot(self.actuator_matrices[wavelength], coef[k])
+
+                # Nominal
                 _slicer, _mirror, slit, slits = self.propagate_one_wavelength(wavelength, wavefront, silent=True)
                 img = self.downsample_image(slit, crop=self.pix)
-                dataset[k, :, :, j] = img
+
+                try:
+                    _peak = self.peaks_wavelength[wavelength]
+                    img /= _peak
+                except KeyError:
+                    pass
+
+                dataset[k, :, :, 2*j] = img
+
+                # Defocused
+                defocused_wavefront = wavefront + self.diversities[wavelength]
+                _slicer, _mirror, slit, slits = self.propagate_one_wavelength(wavelength, defocused_wavefront, silent=True)
+                img = self.downsample_image(slit, crop=self.pix)
+
+                try:
+                    _peak = self.peaks_wavelength[wavelength]
+                    img /= _peak
+                except KeyError:
+                    pass
+
+                dataset[k, :, :, 2*j + 1] = img
+
         finish = time()
         duration = finish - start
         print("%.2f sec / %.2f sec per PSF" % (duration, duration / N_samples))
         return dataset
-
 
 
 class SlicerAnalysis(object):
