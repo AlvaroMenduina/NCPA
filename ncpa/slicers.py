@@ -248,7 +248,7 @@ class SlicerModel(object):
 
         return exit_slits, image
 
-    def downsample_image(self, image, crop=None):
+    def downsample_image(self, image, crop=None, shift=True):
         """
         Take the image of the exit slit [N_PIX, N_PIX] and apply the pixelation
         so that you have 1 spaxel per slice
@@ -263,8 +263,14 @@ class SlicerModel(object):
 
             x_ratio = 1. / self.spaxels_per_slice
             y_ratio = 2. / self.spaxels_per_slice
+            print(x_ratio, y_ratio)
 
-            down_image = zoom(image, zoom=[x_ratio, y_ratio])
+            if shift is True:
+                rolled_image = np.roll(image, shift=(self.spaxels_per_slice//2, self.spaxels_per_slice//4), axis=(0, 1))
+            else:
+                rolled_image = image
+
+            down_image = zoom(rolled_image, zoom=[x_ratio, y_ratio])
 
             X, Y = down_image.shape
             if X < Y:

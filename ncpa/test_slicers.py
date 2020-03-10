@@ -79,7 +79,7 @@ if __name__ == """__main__""":
     # that would
     # In Python we have 1/2 spaxels_per_slice rings at each side in the Pupil Mirror arrays
     N_rings = spaxels_per_slice / 2
-    rings_we_want = 3
+    rings_we_want = 4
     pupil_mirror_aperture = rings_we_want / N_rings
 
     N_PIX = 2048
@@ -89,7 +89,7 @@ if __name__ == """__main__""":
                       "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": True}
 
     HARMONI = slicers.SlicerModel(slicer_options=slicer_options, N_PIX=N_PIX,
-                                  spaxel_scale=spaxel_mas, N_waves=1, wave0=wave0, waveN=waveN, wave_ref=wave0)
+                                  spaxel_scale=spaxel_mas, N_waves=1, wave0=wave0, waveN=waveN, wave_ref=1.5)
 
     for wave in HARMONI.wave_range:
 
@@ -103,8 +103,12 @@ if __name__ == """__main__""":
         maxPix_X = (N_PIX + 1 + 6 * spaxels_per_slice) // 2
         masked_slicer = masked_slicer[minPix_Y:maxPix_Y, minPix_X:maxPix_X]
 
+        dX, dY = maxPix_X - minPix_X, maxPix_Y - minPix_Y  # How many pixels in the masked window
+        masX, masY = dX * spaxel_mas, dY * spaxel_mas
+        masked_extent = [-masX / 2, masX / 2, -masY / 2, masY / 2]
+
         plt.figure()
-        plt.imshow(masked_slicer, cmap='jet')
+        plt.imshow(masked_slicer, cmap='jet', extent=masked_extent)
         plt.colorbar(orientation='horizontal')
         plt.title('HARMONI Slicer: Central Slice @%.2f microns' % wave)
         # plt.show()
@@ -112,7 +116,7 @@ if __name__ == """__main__""":
         masked_pupil_mirror = (np.abs(complex_mirror[N_slices // 2])) ** 2 * HARMONI.pupil_mirror_mask[wave]
         masked_pupil_mirror /= np.max(masked_pupil_mirror)
         plt.figure()
-        plt.imshow(np.log10(masked_pupil_mirror), cmap='jet')
+        plt.imshow(np.log10(masked_pupil_mirror), cmap='jet', extent=masked_extent)
         plt.colorbar()
         plt.clim(vmin=-4)
         plt.title('Pupil Mirror: Aperture %.2f PSF zeros' % rings_we_want)
@@ -121,12 +125,22 @@ if __name__ == """__main__""":
         masked_slit = exit_slit * HARMONI.slicer_masks[N_slices // 2]
         masked_slit = masked_slit[minPix_Y: maxPix_Y, minPix_X: maxPix_X]
         plt.figure()
-        plt.imshow(masked_slit, cmap='jet')
+        plt.imshow(masked_slit, cmap='jet', extent=masked_extent)
         plt.colorbar(orientation='horizontal')
         plt.title('Exit Slit @%.2f microns (Pupil Mirror: %.2f PSF zeros)' % (wave, rings_we_want))
+
+        plt.figure()
+        plt.imshow(exit_slit, cmap='jet', extent=[-1, 1, -1, 1])
+        plt.xlim([-0.2, 0.2])
+        plt.ylim([-0.2, 0.2])
+        plt.title('PSF @%.2f microns' % wave)
+        # plt.colorbar(orientation='horizontal')
+
     plt.show()
 
     img = HARMONI.downsample_image(exit_slit)
+    from scipy.ndimage import zoom
+    img_z = zoom(img, zoom=0.5)
     plt.imshow(np.log(img))
     plt.colorbar()
     plt.show()
@@ -164,7 +178,7 @@ if __name__ == """__main__""":
                                                wave0=1.5, waveN=3.0, wave_ref=1.5, anamorphic=False)
 
     """ (4) Pixelation images """
-    rings_list = np.arange(3, 10)[::-1]
+    rings_list = np.arange(6, 10)[::-1]
     pix_img, pix_grid = analysis.pixelation_effect(N_slices=31, spaxels_per_slice=32, spaxel_mas=mas_slice/32,
                                          rings_we_want=rings_list, N_PIX=2048, N_waves=2, wave0=1.5, waveN=2.0,
                                          wave_ref=1.5, anamorphic=True, crop=16)
