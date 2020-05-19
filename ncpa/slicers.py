@@ -26,7 +26,7 @@ import utils
 import psf
 import calibration
 
-CENTRAL_OBS = 0.30          # ELT central obscuration
+CENTRAL_OBS = 0.000          # ELT central obscuration
 
 
 def pupil_mask(xx, yy, rho_aper, rho_obsc, anamorphic=False):
