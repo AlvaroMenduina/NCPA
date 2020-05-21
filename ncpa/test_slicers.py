@@ -542,22 +542,25 @@ if __name__ == """__main__""":
     # Create a Python Standalone Application
     psa = PythonStandaloneApplication()
     zemax_path = os.path.abspath("D:\Research\Python Simulations\Image Slicer Effects")
-    zemax_file = "HARMONI_SLICER_EFFECTS_ZOSAPI.zmx"
+    zemax_file = "HARMONI_SLICER_EFFECTS.zmx"
     # Dictionary of the wavelengths defined in the zemax file
     wavelengths = {1: 1.50, 2: 1.75, 3: 2.00, 4: 2.5, 5: 3.00, 6:1.25}
+
+    # Let's remind us of the nominal apertures of the different surfaces
+    apertures = {'Pupil Mirror': [4.5, 3.5], 'SMA': [6.5, 3.5]}
 
     # (1) Show the Nominal PSF at each surface for HARMONI with POP
     pop_analysis = POPAnalysis(zosapi=psa)
 
     results_path = os.path.abspath("D:\Research\Python Simulations\Image Slicer Effects\ZOS API HARMONI")
-    N_pix = 2048
+    N_pix = 1024
     N_slices = 73
     pupil_mirror = 32
     y_half = 3.5 / 2
     slice_idx = 21
     for wave_idx in np.arange(1, 6)[:1]:
         print(wave_idx)
-        pop_settings = {'CONFIG': slice_idx, 'X_HALFWIDTH': 4.5, 'Y_HALFWIDTH': y_half, 'SAMPLING': N_pix,
+        pop_settings = {'CONFIG': slice_idx, 'X_HALFWIDTH': 4.5, 'Y_HALFWIDTH': 3.5, 'SAMPLING': N_pix,
                         'N_SLICES': N_slices, 'END_SURFACE': pupil_mirror, 'WAVE_IDX': wave_idx}
 
         pm_data, cresults = pop_analysis.run_pop(zemax_path=zemax_path, zemax_file=zemax_file, settings=pop_settings)
