@@ -8,6 +8,7 @@ Date: May 2020
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from astropy.io import fits
 import matplotlib.cm as cm
 from time import time
 import utils
@@ -24,6 +25,7 @@ apertures = {'Pupil Mirror': {'X_HALF': 4.5, 'Y_HALF': 1.75}, 'SMA': {'X_HALF': 
 
 # Dictionary of the wavelengths defined in the zemax file
 zemax_wavelengths = {1: 1.50, 2: 1.75, 3: 2.00, 4: 2.5, 5: 3.00, 6: 1.25}
+N_slices = 31
 
 
 # Taken from Zemax example code
@@ -542,7 +544,7 @@ if __name__ == """__main__""":
     # First we have to match the Slice Size to have a proper clipping at the Slicer Plane
     # That comes from the product spaxels_per_slice * spaxel_mas
 
-    N_slices = 31
+
     spaxels_per_slice = 32
     spaxel_mas = 0.21875/2  # to get a decent resolution
 
@@ -570,13 +572,14 @@ if __name__ == """__main__""":
     # # (1) Show the Nominal PSF at each surface for HARMONI with POP
     pop_analysis = POPAnalysis(zosapi=psa)
     N_pix = 2048
-    N_slices = 73
+    # N_slices = 73
     pupil_mirror, sma = 32, 36
     y_half = 3.5
     slice_idx = 19
-    defocus = 0.25
-    for wave_idx in np.arange(1, 6)[:1]:
+    defocus = None
+    for wave_idx in [1]:
         print(wave_idx)
+        wavelength = zemax_wavelengths[wave_idx]
         pop_settings = {'CONFIG': slice_idx, 'X_HALFWIDTH': 4.5, 'Y_HALFWIDTH': 3.5, 'SAMPLING': N_pix,
                         'N_SLICES': N_slices, 'END_SURFACE': pupil_mirror, 'WAVE_IDX': wave_idx}
 
@@ -594,7 +597,7 @@ if __name__ == """__main__""":
         ax1.set_ylim([-4/zoom_, 4/zoom_])
         ax1.set_xlabel(r'X [mm]')
         ax1.set_ylabel(r'Y [mm]')
-        ax1.set_title(r'Pupil Mirror [%dx zoom]' % zoom_)
+        ax1.set_title(r'Pupil Mirror [%dx zoom] | %.2f $\mu$m' % (zoom_, wavelength))
         ax1.set_xticks(np.arange(-zoom_, zoom_ + 1))
         ax1.set_yticks(np.arange(-zoom_, zoom_ + 1))
 
@@ -627,7 +630,7 @@ if __name__ == """__main__""":
         ax1.set_ylim([-4/zoom_, 4/zoom_])
         ax1.set_xlabel(r'X [mm]')
         ax1.set_ylabel(r'Y [mm]')
-        ax1.set_title(r'Slit Mirror [%dx zoom]' % zoom_)
+        ax1.set_title(r'Slit Mirror [%dx zoom] | %.2f $\mu$m' % (zoom_, wavelength))
         ax1.set_xticks(np.arange(-zoom_, zoom_ + 1))
         ax1.set_yticks(np.arange(-zoom_, zoom_ + 1))
 
@@ -660,7 +663,7 @@ if __name__ == """__main__""":
         ax1.set_ylim([-ss*slice_dim, ss*slice_dim])
         ax1.set_xlabel(r'X [mm]')
         ax1.set_ylabel(r'Y [mm]')
-        ax1.set_title(r'Exit Slit')
+        ax1.set_title(r'Exit Slit | %.2f $\mu$m' % (wavelength))
 
         slit_img2 = ax2.imshow(np.log10(slit_data), cmap='jet', extent=extent)
         slit_img2.set_clim(-6)
@@ -682,19 +685,21 @@ if __name__ == """__main__""":
     # comparison.compare_exit_psf(N_zeros=3, wave_idx=1, results_path=results_path)
 
     # POP PSF for Phase Diversity
-    pop = CompareZemaxPython(zosapi=psa, N_pix=1024, zemax_path=zemax_path, zemax_file=zemax_file)
-    pop_psf, pop_extent = pop.pop_psf(N_zeros=3, wave_idx=1)
-    x_window = 2 * pop_extent[1]
-
-    fig, ax = plt.subplots(1, 1)
-    img1 = ax.imshow(pop_psf)
-    plt.colorbar(img1, ax=ax)
-    plt.show()
+    pop = CompareZemaxPython(zosapi=psa, N_pix=2048, zemax_path=zemax_path, zemax_file=zemax_file)
+    pop_psf, pop_extent = pop.pop_psf(N_zeros=3, wave_idx=1, defocus_pv=None)
+    x_win = pop_extent[1]
 
     final_psf = pop.fix_anamorph(pop_psf, pop_extent)
     # After we fix the anamorph the size in X is halved
     x_final = pop_extent[1]
     x_sampling = x_final / final_psf.shape[0]       # mm / pixel
+
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+    img1 = ax1.imshow(np.log10(pop_psf))
+    ax1.set_title(r'Raw Anamorphic')
+    img2 = ax2.imshow(np.log10(final_psf), extent=[-x_win/2, x_win/2, -x_win/2, x_win/2])
+    ax2.set_title(r'Downsampled Y')
+    plt.show()
 
     # Things to do: find out about the Nyquist sampling condition
 
@@ -709,14 +714,86 @@ if __name__ == """__main__""":
 
 
 
-    from astropy.io import fits
-
     def save_fits(psf_array, results_path, file_name):
 
-        hdu = fits.PrimaryHDU(psf_array)
-        hdu.writeto(os.path.join(results_path, file_name + '.fits'))
+        hdu = fits.PrimaryHDU([psf_array, psf_array])
+        hdr = hdu.header
+        hdr['PIX'] = 2048
+        hdu.writeto(os.path.join(results_path, file_name + '.fits'), overwrite=True)
 
 
+    save_fits(final_psf, results_path, 'PSF_%dPix_Nominal' % N_pix)
+
+    def read_fits(path_to_file):
+        with fits.open(path_to_file) as hdul:
+            hdul.info()
+            hdr = hdul[0].header
+            print(repr(hdr))
+            print(list(hdr.keys()))
+
+    read_fits(os.path.join(results_path, 'PSF_%dPix_Nominal' % N_pix + '.fits'))
+
+    class PhaseDiversityPSF(object):
+
+        def __init__(self, zosapi, zemax_path, zemax_file, results_path):
+
+            self.zosapi = zosapi
+            self.zemax_path = zemax_path
+            self.zemax_file = zemax_file
+            self.results_path = results_path
+
+        @staticmethod
+        def save_fits(list_psf, header_info, path_to_file):
+
+            # create a HDU and add the [Nominal PSF, Defocused PSF]
+            hdu = fits.PrimaryHDU(list_psf)
+            # edit the header to add WAVELENGTH info
+            for (key, value) in header_info.items():
+                hdu.header[key] = value
+
+            # save
+            hdu.writeto(path_to_file, overwrite=True)
+
+            return
+
+        @staticmethod
+        def read_fits(path_to_file):
+            with fits.open(path_to_file) as hdul:
+                hdul.info()
+                hdr = hdul[0].header
+                print(repr(hdr))
+                print(list(hdr.keys()))
+
+        def generate_fits(self, N_PIX, wavelength, N_zeros, defocus_pv):
+
+            # Find the wave index for that wavelength in the dictionary
+            wave_idx = list(zemax_wavelengths.keys())[list(zemax_wavelengths.values()).index(wavelength)]
+
+            # POP PSF for Phase Diversity
+            pop = CompareZemaxPython(zosapi=self.zosapi, N_pix=2 * N_PIX, zemax_path=self.zemax_path, zemax_file=self.zemax_file)
+            raw_pop_nominal, raw_pop_nominal_extent = pop.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=None)
+            pop_nominal_psf = pop.fix_anamorph(raw_pop_nominal, raw_pop_nominal_extent)
+            x_win = raw_pop_nominal_extent[1]
+
+            raw_pop_defocus, raw_pop_defocus_extent = pop.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=defocus_pv)
+            pop_defocus_psf = pop.fix_anamorph(raw_pop_defocus, raw_pop_defocus_extent)
+
+            # Header
+            header = {}
+            header['WAVE'] = (wavelength, 'Nominal Wavelength [microns]')
+            header['LEN_X'] = (x_win, 'Physical size X [mm]')
+            header['FOCUS_PV'] = (defocus_pv, 'Defocus Peak-to-Valley [waves]')
+
+            # save
+            file_name = 'PSF_%dPix_Wave_%.2fmicrons_Defocus_%.2fPV.fits' % (N_PIX, wavelength, defocus_pv)
+            self.save_fits(list_psf=[pop_nominal_psf, pop_defocus_psf], header_info=header,
+                           path_to_file=os.path.join(self.results_path, file_name))
+
+            return
+
+    pd = PhaseDiversityPSF(zosapi=psa, zemax_path=zemax_path, zemax_file=zemax_file, results_path=results_path)
+    pd.generate_fits(N_PIX=256, wavelength=1.5, N_zeros=3, defocus_pv=0.10)
+    pd.read_fits(os.path.join(results_path, 'PSF_256Pix_Wave_1.50microns_Defocus_0.10PV.fits'))
 
 
     del psa
