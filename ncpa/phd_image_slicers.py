@@ -236,7 +236,6 @@ class POPAnalysis(object):
             pop_data.XWidth = N_slices * slice_size
             pop_data.YWidth = N_slices * slice_size
 
-
         # (4) Set the POP Analysis Parameters
         pop = system.Analyses.New_Analysis_SettingsFirst(constants.AnalysisIDM_PhysicalOpticsPropagation)
         pop.Terminate()
@@ -267,6 +266,8 @@ class POPAnalysis(object):
 
         cresults = CastTo(pop_results, 'IAR_')
         data = np.array(cresults.GetDataGrid(0).Values)
+
+        CastTo(pop, 'ISystemTool').Close()
 
         self.zosapi.CloseFile(save=False)
 
@@ -733,6 +734,9 @@ if __name__ == """__main__""":
 
     read_fits(os.path.join(results_path, 'PSF_%dPix_Nominal' % N_pix + '.fits'))
 
+
+
+
     class PhaseDiversityPSF(object):
 
         def __init__(self, zosapi, zemax_path, zemax_file, results_path):
@@ -764,19 +768,31 @@ if __name__ == """__main__""":
                 print(repr(hdr))
                 print(list(hdr.keys()))
 
+                # read the data
+                data = hdul[0].data
+                nom, foc = data[0], data[1]
+                fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2)
+                img1 = ax1.imshow(nom)
+                ax1.set_title('Nominal')
+                img2 = ax2.imshow(foc)
+                ax2.set_title('Defocus')
+                img3 = ax3.imshow(np.log10(nom))
+                img4 = ax4.imshow(np.log10(foc))
+
+
         def generate_fits(self, N_PIX, wavelength, N_zeros, defocus_pv):
 
             # Find the wave index for that wavelength in the dictionary
             wave_idx = list(zemax_wavelengths.keys())[list(zemax_wavelengths.values()).index(wavelength)]
 
             # POP PSF for Phase Diversity
-            pop = CompareZemaxPython(zosapi=self.zosapi, N_pix=2 * N_PIX, zemax_path=self.zemax_path, zemax_file=self.zemax_file)
-            raw_pop_nominal, raw_pop_nominal_extent = pop.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=None)
-            pop_nominal_psf = pop.fix_anamorph(raw_pop_nominal, raw_pop_nominal_extent)
+            pop_ = CompareZemaxPython(zosapi=self.zosapi, N_pix=2 * N_PIX, zemax_path=self.zemax_path, zemax_file=self.zemax_file)
+            raw_pop_nominal, raw_pop_nominal_extent = pop_.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=None)
+            pop_nominal_psf = pop_.fix_anamorph(raw_pop_nominal, raw_pop_nominal_extent)
             x_win = raw_pop_nominal_extent[1]
 
-            raw_pop_defocus, raw_pop_defocus_extent = pop.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=defocus_pv)
-            pop_defocus_psf = pop.fix_anamorph(raw_pop_defocus, raw_pop_defocus_extent)
+            raw_pop_defocus, raw_pop_defocus_extent = pop_.pop_psf(N_zeros=N_zeros, wave_idx=wave_idx, defocus_pv=defocus_pv)
+            pop_defocus_psf = pop_.fix_anamorph(raw_pop_defocus, raw_pop_defocus_extent)
 
             # Header
             header = {}
