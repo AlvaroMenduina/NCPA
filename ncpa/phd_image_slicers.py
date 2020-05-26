@@ -237,6 +237,11 @@ class POPAnalysis(object):
             pop_data.YWidth = N_slices * slice_size
 
         # (4) Set the POP Analysis Parameters
+        theAnalyses = system.Analyses
+        nanaly = theAnalyses.NumberOfAnalyses
+        # for i in range(1, nanaly + 1)[::-1]:  # must close in reverse order
+        #     theAnalyses.CloseAnalysis(i)
+        print("Number of Analyses: ", nanaly)
         pop = system.Analyses.New_Analysis_SettingsFirst(constants.AnalysisIDM_PhysicalOpticsPropagation)
         pop.Terminate()
         pop_setting = pop.GetSettings()
@@ -268,6 +273,10 @@ class POPAnalysis(object):
         data = np.array(cresults.GetDataGrid(0).Values)
 
         CastTo(pop, 'ISystemTool').Close()
+
+        # for i in range(1, nanaly + 1)[::-1]:  # must close in reverse order
+
+        theAnalyses.CloseAnalysis(nanaly)
 
         self.zosapi.CloseFile(save=False)
 
