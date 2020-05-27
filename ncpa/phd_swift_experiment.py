@@ -156,9 +156,8 @@ class POPAnalysisSWIFT(object):
         field_idx = settings['FIELD_IDX'] if 'FIELD_IDX' in settings else 1
         XWidth = settings['X_WIDTH']
         YWidth = settings['Y_WIDTH']
-        # x_halfwidth = settings['X_HALFWIDTH']
-        # y_halfwidth = settings['Y_HALFWIDTH']
         end_surface = settings['END_SURFACE'] if 'END_SURFACE' in settings else LDE.NumberOfSurfaces - 1
+        N_PIX = pop_sampling[settings['N_PIX']]
         sampling = pop_sampling[settings['SAMPLING']]
         beam_type = beam_types[settings['BEAM_TYPE']] if 'BEAM_TYPE' in settings else 3
 
@@ -169,7 +168,29 @@ class POPAnalysisSWIFT(object):
         system.MCE.SetCurrentConfiguration(config)
         print("(1) Setting Configuration to #%d" % config)
 
-        # Do NOT touch the Pupil Apertures at the moment
+
+        if 'PM_X_HALFWIDTH' in settings:
+            print("(2) Setting Pupil Mirror Aperture")
+            x_halfwidth = settings['PM_X_HALFWIDTH']
+            pupil_mirror = system.LDE.GetSurfaceAt(surf_pupil_mirror)
+            # Read Current Aperture Settings
+            apt_type = pupil_mirror.ApertureData.CurrentType
+            if apt_type == 4:  # 4 is Rectangular aperture
+                current_apt_sett = pupil_mirror.ApertureData.CurrentTypeSettings
+                print("Current Settings:")
+                print("X_HalfWidth = %.2f" % current_apt_sett._S_RectangularAperture.XHalfWidth)
+                # print("Y_HalfWidth = %.2f" % current_apt_sett._S_RectangularAperture.YHalfWidth)
+                # Change Settings
+                aperture_settings = pupil_mirror.ApertureData.CreateApertureTypeSettings(
+                    constants.SurfaceApertureTypes_RectangularAperture)
+                aperture_settings._S_RectangularAperture.XHalfWidth = x_halfwidth
+                # aperture_settings._S_RectangularAperture.YHalfWidth = y_halfwidth
+                pupil_mirror.ApertureData.ChangeApertureTypeSettings(aperture_settings)
+
+                current_apt_sett = pupil_mirror.ApertureData.CurrentTypeSettings
+                print("New Settings:")
+                print("X_HalfWidth = %.2f" % current_apt_sett._S_RectangularAperture.XHalfWidth)
+                # print("Y_HalfWidth = %.2f" % current_apt_sett._S_RectangularAperture.YHalfWidth)
 
         if end_surface == LDE.NumberOfSurfaces - 1:
             # (2) Set the Sampling at the last surface
@@ -202,8 +223,8 @@ class POPAnalysisSWIFT(object):
             pop_settings.ModifySettings(cfg, 'POP_FIELD:', field_idx)
             pop_settings.ModifySettings(cfg, 'POP_BEAMTYPE', beam_type)  # 3 for Top Hap beam
             pop_settings.ModifySettings(cfg, 'POP_POWER', 1)
-            pop_settings.ModifySettings(cfg, 'POP_SAMPX', sampling)
-            pop_settings.ModifySettings(cfg, 'POP_SAMPY', sampling)
+            pop_settings.ModifySettings(cfg, 'POP_SAMPX', N_PIX)
+            pop_settings.ModifySettings(cfg, 'POP_SAMPY', N_PIX)
             pop_settings.ModifySettings(cfg, 'POP_PARAM1', waist_x)  # Waist X
             pop_settings.ModifySettings(cfg, 'POP_PARAM2', waist_y)  # Waist Y
             pop_settings.ModifySettings(cfg, 'POP_AUTO', 1)  # needs to go after POP_PARAM
@@ -243,42 +264,50 @@ if __name__ == """__main__""":
 
     zemax_wavelengths = {1: 0.65, 2: 0.85, 3: 1.00}
     wave_idx = 2
+    det_pix = 0.0025    # 13.5 microns
+    N_pix = 1024
+    backoptics_mag = 1.13
+    PIX = 128
+    x_width = det_pix * N_pix
+    # we divide by
 
     # run some POP
     pop_analysis = POPAnalysisSWIFT(zosapi=psa)
 
     # Show all 4 slices
-    fig, axes = plt.subplots(1, 4)
+    # fig, axes = plt.subplots(1, 4)
     all_slices = []
     for i, config in enumerate([19, 20, 21, 22]):
-        pop_settings = {'CONFIG': config, 'SAMPLING': 1024, 'X_WIDTH': 3.33, 'Y_WIDTH': 3.33, 'WAVE_IDX': wave_idx}
+        pop_settings = {'CONFIG': config, 'N_PIX': N_pix, 'SAMPLING': N_pix,
+                        'X_WIDTH': x_width, 'Y_WIDTH': x_width, 'WAVE_IDX': wave_idx}
         pop_data, cresults = pop_analysis.run_pop(zemax_path=zemax_path, zemax_file=zemax_file, settings=pop_settings)
-        all_slices.append(pop_data)
-        minX, minY = cresults.GetDataGrid(0).MinX, cresults.GetDataGrid(0).MinY
+        # We have to transpose the PSF because of the weird XY coordinates of the Zemax file
+        all_slices.append(pop_data.T)
+        minX, minY = cresults.GetDataGrid(0).MinY, cresults.GetDataGrid(0).MinX
         extent = [minX, -minX, minY, -minY]
-
-        ax = axes[i]
-        img = ax.imshow(np.log10(pop_data), origin='lower', extent=extent)
-        # plt.colorbar(img, ax=ax)
-        ax.set_title(r'Slice #%d' % config)
-        ax.set_xlabel(r'X [mm]')
-        ax.set_ylabel(r'Y [mm]')
-    plt.show()
+        #
+        # ax = axes[i]
+        # img = ax.imshow(np.log10(pop_data.T), origin='lower', extent=extent)
+        # # plt.colorbar(img, ax=ax)
+        # ax.set_title(r'Slice #%d' % config)
+        # ax.set_xlabel(r'X [mm]')
+        # ax.set_ylabel(r'Y [mm]')
 
     psf = np.array(all_slices)
     psf = np.sum(psf, axis=0)
 
+    cmap = 'hot'
     fig, (ax1, ax2) = plt.subplots(1, 2)
-    img_psf = ax1.imshow(psf, origin='lower', extent=extent)
+    img_psf = ax1.imshow(psf, origin='lower', extent=extent, cmap=cmap)
     ax1.set_xlabel(r'X [mm]')
     ax1.set_ylabel(r'Y [mm]')
     ax1.set_title(r'SWIFT PSF | %.2f $\mu$m' % zemax_wavelengths[wave_idx])
 
-    log_psf = ax2.imshow(np.log10(psf), origin='lower', extent=extent)
-    log_psf.set_clim(vmin=-4.5)
+    log_psf = ax2.imshow(np.log10(psf), origin='lower', extent=extent, cmap=cmap)
+    log_psf.set_clim(vmin=-4)
     ax2.set_xlabel(r'X [mm]')
-    # ax2.set_ylabel(r'Y [mm]')
-    # ax2.set_title(r'SWIFT PSF | %.2f $\mu$m' % zemax_wavelengths[wave_idx])
+    ax2.set_ylabel(r'Y [mm]')
+    ax2.set_title(r'%d Pixels | Sampling: %.1f $\mu$m per pixel' % (N_pix, 1000 * det_pix))
 
     plt.show()
 
@@ -286,6 +315,67 @@ if __name__ == """__main__""":
     # 4 slices at the exit slit plane occupy +- 0.22 mm
     # so the
 
-    del psa
-    psa = None
+
+    # Impact of apertures
+
+
+    def zeros_PSF(N_pix, SNR=50):
+
+        # nominal aperture
+        x_aper = 4.54  # this is half width
+        # At 850 nm, for a half width X of 0.91 we can fit 3 PSF zeroes
+
+        mm_per_zero = 0.91 / 3
+
+        zeros = [2, 3, 4]
+        fig, axes = plt.subplots(1, len(zeros))
+        for j, N_zeros in enumerate(zeros):
+
+            all_slices = []
+            for i, config in enumerate([19, 20, 21]):
+                pop_settings = {'CONFIG': config, 'N_PIX': N_pix, 'SAMPLING': N_pix, 'X_WIDTH': x_width, 'Y_WIDTH': x_width,
+                                'WAVE_IDX': wave_idx,
+                                'PM_X_HALFWIDTH': N_zeros * mm_per_zero}
+                pop_data, cresults = pop_analysis.run_pop(zemax_path=zemax_path, zemax_file=zemax_file,
+                                                          settings=pop_settings)
+                # We have to transpose the PSF because of the weird XY coordinates of the Zemax file
+                all_slices.append(pop_data.T)
+                minX, minY = cresults.GetDataGrid(0).MinY, cresults.GetDataGrid(0).MinX
+                extent = [minX, -minX, minY, -minY]
+
+            psf = np.array(all_slices)
+            psf = np.sum(psf, axis=0)
+            psf /= np.max(psf)
+
+            psf += np.random.normal(0.0, scale=1/SNR, size=(N_pix, N_pix))
+
+            ax = axes[j]
+            img = ax.imshow(psf, origin='lower', extent=extent, cmap=cmap)
+            ax.set_xlabel(r'X [mm]')
+            ax.set_ylabel(r'Y [mm]')
+            ax.set_xlim([-0.5, 0.5])
+            ax.set_ylim([-0.5, 0.5])
+            ax.set_title(r'SWIFT PSF | %.2f $\mu$m | %d PSF Zeros | SNR %d' % (zemax_wavelengths[wave_idx], N_zeros, SNR))
+
+    zeros_PSF(1024)
+
+    plt.show()
+
+    #
+    # cmap = 'hot'
+    # fig, (ax1, ax2) = plt.subplots(1, 2)
+    # img_psf = ax1.imshow(psf, origin='lower', extent=extent, cmap=cmap)
+    # ax1.set_xlabel(r'X [mm]')
+    # ax1.set_ylabel(r'Y [mm]')
+    # ax1.set_title(r'SWIFT PSF | %.2f $\mu$m' % zemax_wavelengths[wave_idx])
+    #
+    # log_psf = ax2.imshow(np.log10(psf), origin='lower', extent=extent, cmap=cmap)
+    # log_psf.set_clim(vmin=-4)
+    # ax2.set_xlabel(r'X [mm]')
+    # ax2.set_ylabel(r'Y [mm]')
+    # ax2.set_title(r'%d Pixels | Sampling: %.1f $\mu$m per pixel' % (N_pix, 1000 * det_pix))
+
+
+    # del psa
+    # psa = None
 
