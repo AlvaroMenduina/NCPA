@@ -1485,4 +1485,4 @@ class Zernike_fit(object):
         x_fit = np.dot(invN, Hty_obs)
 
         return x_fit
-    
+
