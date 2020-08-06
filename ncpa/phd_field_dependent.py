@@ -12,6 +12,8 @@ import matplotlib.cm as cm
 from time import time
 import zernike as zern
 
+import calibration
+
 from win32com.client.gencache import EnsureDispatch, EnsureModule
 from win32com.client import constants
 from win32com.client import CastTo
@@ -269,26 +271,33 @@ class POPAnalysis(object):
         # print("Zernike: ", system.LDE.GetSurfaceAt(2).TypeName)
         zernike_phase = system.LDE.GetSurfaceAt(2)
         # Setting the N_terms to 0 removes all coefficients (sanity check)
-        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par13).IntegerValue = 0
+        # zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par13).IntegerValue = 0
         # Start with the terms again
 
         if defocus_pv is not None:
-            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par13).IntegerValue = 12
+            # zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par13).IntegerValue = 12
             # 15 is Piston, 18 is Defocus, 19 is Astigmatism
-            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15).DoubleValue = 1.5 / 2 * defocus_pv
-            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue = 2.5 / 2 * defocus_pv
-            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19).DoubleValue = -3.0 / 2 * defocus_pv
 
-        print("Piston: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15))
-        print("Defocus: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18))
-        print("Astigm: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19))
+            # We get whatever aberration there is from NCPA, and add the defocus on top
+            a0 = zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15).DoubleValue
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15).DoubleValue = a0 + 1.5 / 2 * defocus_pv
+
+            b0 = zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue = b0 + 2.5 / 2 * defocus_pv
+
+            c0 = zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19).DoubleValue
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19).DoubleValue = c0 -3.0 / 2 * defocus_pv
+
+        # print("Piston: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15))
+        # print("Defocus: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18))
+        # print("Astigm: ", zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19))
 
         # (0) Info
-        print("\nRunning POP analysis to Surface #%d: %s" % (end_surface, LDE.GetSurfaceAt(end_surface).Comment))
+        # print("\nRunning POP analysis to Surface #%d: %s" % (end_surface, LDE.GetSurfaceAt(end_surface).Comment))
 
         # (1) Set the Configuration to the Slice of interest
         system.MCE.SetCurrentConfiguration(config)
-        print("(1) Setting Configuration to #%d" % config)
+        # print("(1) Setting Configuration to #%d" % config)
 
         if end_surface == LDE.NumberOfSurfaces - 1:
             # (3) Set the Sampling at the last surface
@@ -306,7 +315,7 @@ class POPAnalysis(object):
         nanaly = theAnalyses.NumberOfAnalyses
         # for i in range(1, nanaly + 1)[::-1]:  # must close in reverse order
         #     theAnalyses.CloseAnalysis(i)
-        print("Number of Analyses: ", nanaly)
+        # print("Number of Analyses: ", nanaly)
         pop = system.Analyses.New_Analysis_SettingsFirst(constants.AnalysisIDM_PhysicalOpticsPropagation)
         pop.Terminate()
         pop_setting = pop.GetSettings()
@@ -338,13 +347,20 @@ class POPAnalysis(object):
         data = np.array(cresults.GetDataGrid(0).Values)
         CastTo(pop, 'ISystemTool').Close()
 
+        # Get rid of the defocus
+        if defocus_pv is not None:
+
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par15).DoubleValue = a0
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue = b0
+            zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19).DoubleValue = c0
+
         # for i in range(1, nanaly + 1)[::-1]:  # must close in reverse order
 
         theAnalyses.CloseAnalysis(nanaly)
         # self.zosapi.CloseFile(save=False)
 
         total_time = time() - start
-        print("Analysis finished in %.2f seconds" % total_time)
+        # print("Analysis finished in %.2f seconds" % total_time)
 
         return data, cresults
 
@@ -370,7 +386,23 @@ class POPAnalysis(object):
             new_psf[i, :] = np.mean(cut, axis=0)
         return new_psf
 
-    def calculate_pop_psf(self, N_zernike, N_slices, z_max, wave_idx, defocus_pv):
+    def add_ncpa(self, system, zern_coef):
+
+        zernike_phase = system.LDE.GetSurfaceAt(2)
+        z_max = 0.20
+        N = 5
+        # zern_coef = np.random.uniform(low=-z_max, high=z_max, size=N)
+        # 15 is Piston, 18 is Defocus, 19 is Astigmatism
+        print("Adding NCPA")
+        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue = zern_coef[0]
+        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par19).DoubleValue = zern_coef[1]
+        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par20).DoubleValue = zern_coef[2]
+        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par21).DoubleValue = zern_coef[3]
+        zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par22).DoubleValue = zern_coef[4]
+
+        return
+
+    def calculate_pop_psf(self, N_zernike, N_slices, z_max, zern_coef=None, wave_idx=1, defocus_pv=None):
 
         # check that the file name is correct and the zemax file exists
         if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
@@ -382,47 +414,74 @@ class POPAnalysis(object):
         # Get some info on the system
         system = self.zosapi.TheSystem  # The Optical System
 
-        if z_max != 0.0:
-            # Set the Field-dependent aberrations
-            mean_rms = self.set_field_aberrations(system, N_zernike, N_slices, z_max=z_max)
-        else:
+        # Set the Field-dependent aberrations
+        if z_max is None:
             mean_rms = 0.0
+        else:
+            print("Adding Field Dependent Aberrations")
+            mean_rms = self.set_field_aberrations(system, N_zernike, N_slices, z_max=z_max)
+
+        # Add NCPA aberrations at the entrace pupil
+        if zern_coef is not None:
+            self.add_ncpa(system, zern_coef)
 
         delta = (N_slices - 1) // 2
         config_keys = ['-%d' % (i + 1) for i in range(delta)] + ['Central'] + ['+%d' % (i + 1) for i in range(delta)]
         configs = [pop_analysis.config_slices[key] for key in config_keys]
 
-        # Run the POP PSF calculation
+        # Run the NOMINAL POP PSF calculation
+        print("\nCalculating NOMINAL PSF")
         pop_psf = []
         for config_slice in configs:
             pop_settings = {'CONFIG': config_slice, 'SAMPLING': self.N_pix, 'N_SLICES': N_slices, 'WAVE_IDX': wave_idx}
-            pop_slit, cresults = self.run_pop(system=system, settings=pop_settings, defocus_pv=defocus_pv)
+            pop_slit, cresults = self.run_pop(system=system, settings=pop_settings, defocus_pv=0.0)
             pop_psf.append(pop_slit)
         pop_psf = np.array(pop_psf)
         pop_psf = np.sum(pop_psf, axis=0)
 
+        pop_psf = self.fix_anamorph(pop_psf)
+
         # minX, minY = cresults.GetDataGrid(0).MinX, cresults.GetDataGrid(0).MinY
         # pop_extent = [minX, -minX, minY, -minY]
 
-        pop_psf = self.fix_anamorph(pop_psf)
+        # Run the NOMINAL POP PSF calculation
+        print("\nCalculating DEFOCUS PSF | Defocus: %.2f waves PV" % defocus_pv)
+        pop_psf_foc = []
+        for config_slice in configs:
+            pop_settings = {'CONFIG': config_slice, 'SAMPLING': self.N_pix, 'N_SLICES': N_slices, 'WAVE_IDX': wave_idx}
+            pop_slit, cresults = self.run_pop(system=system, settings=pop_settings, defocus_pv=defocus_pv)
+            pop_psf_foc.append(pop_slit)
+        pop_psf_foc = np.array(pop_psf_foc)
+        pop_psf_foc = np.sum(pop_psf_foc, axis=0)
+
+        pop_psf_foc = self.fix_anamorph(pop_psf_foc)
 
         self.zosapi.CloseFile(save=False)
-        return pop_psf, mean_rms
-#
-# def zernike_phase(coef):
-#
-#     N_PIX = 1024
-#     x = np.linspace(-1, 1, N_PIX, endpoint=True)
-#     xx, yy = np.meshgrid(x, x)
-#     rho, theta = np.sqrt(xx ** 2 + yy ** 2), np.arctan2(xx, yy)
-#     pupil = rho <= 1.0
-#
-#     rho, theta = rho[pupil], theta[pupil]
-#     zernike = zern.ZernikeNaive(mask=pupil)
-#     _phase = zernike(coef=np.zeros(N_zern), rho=rho / (radial_oversize * rho_aper), theta=theta, normalize_noll=False,
-#                      mode='Jacobi', print_option='Silent')
-#     H_flat = zernike.model_matrix[:, 3:]
-#     H_matrix = zern.invert_model_matrix(H_flat, pupil)
+
+        return pop_psf, pop_psf_foc, mean_rms
+
+    def generate_dataset(self, N_PSF, N_zernike, N_slices, z_max, wave_idx, defocus_pv):
+
+        z = 0.10
+        zern_coef = np.random.uniform(low=-z, high=z, size=(N_PSF, 5))
+        PSF_array = np.zeros((N_PSF, self.N_pix//2, self.N_pix//2, 2))
+        mean_field_rms = []
+        for k in range(N_PSF):
+            if k % 50 == 0:
+                print("PSF #%d / %d" % (k + 1, N_PSF))
+            coef = zern_coef[k]
+            psf_nom, psf_foc, _rms = self.calculate_pop_psf(N_zernike=N_zernike, N_slices=N_slices, z_max=z_max,
+                                                            zern_coef=coef, wave_idx=wave_idx, defocus_pv=defocus_pv)
+            PSF_array[k, :, :, 0] = psf_nom
+            PSF_array[k, :, :, 1] = psf_foc
+            mean_field_rms.append(_rms)
+
+        PEAK = np.max(PSF_array[:, :, :, 0])
+        PSF_array /= PEAK
+
+        mean_field_rms = np.array(mean_field_rms)
+
+        return PSF_array, zern_coef, mean_field_rms
 
 
 if __name__ == """__main__""":
@@ -437,65 +496,213 @@ if __name__ == """__main__""":
     # Create a Python Standalone Application
     psa = PythonStandaloneApplication()
 
-    #
-    N_pix = 512
+    waves_dict = {1: 1.5, 2: 1.75}
+    N_pix = 128
+    wave_idx = 1
+    defocus_pv = 0.25
+    wavelength = waves_dict[wave_idx]
     pop_analysis = POPAnalysis(zosapi=psa, N_pix=N_pix)
 
     N_zernike = 12
-    N_slices = 7
+    N_slices = 9
     width = N_slices * 0.130
     extent = [-width/2, width/2, -width/2, width/2]
-    psf, _r = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.0, wave_idx=1, defocus_pv=None)
-    pop_peak = np.max(psf)
-    psf /= pop_peak
+    #
+    # # Nominal PSF (no aberrations)
+    # psf, psf_foc, _r = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=None, wave_idx=wave_idx, defocus_pv=defocus_pv)
+    # pop_peak = np.max(psf)
+    # psf /= pop_peak
+    # psf_foc /= pop_peak
+    #
+    # psf_field, psf_field_foc, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.01,
+    #                                                                     wave_idx=wave_idx, defocus_pv=defocus_pv)
+    # psf_field /= pop_peak
+    # psf_field_foc /= pop_peak
+    #
+    # for nom_PSF, field_PSF, name in zip([psf, psf_foc], [psf_field, psf_field_foc], ['Nominal', 'Defocus']):
+    #
+    #     fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
+    #     cmap = 'inferno'
+    #     # Nominal PSF (No Field Aberrations
+    #     img1 = ax1.imshow((nom_PSF), origin='lower', cmap=cmap, extent=extent)
+    #     plt.colorbar(img1, ax=ax1, orientation='horizontal')
+    #     ax1.set_xlabel(r'X [mm]')
+    #     ax1.set_ylabel(r'Y [mm]')
+    #     ax1.set_title(r'%s PSF $\lambda$ = %.2f $\mu$m' % (name, wavelength))
+    #     img1.set_clim(0, 1)
+    #
+    #     img2 = ax2.imshow((field_PSF), origin='lower', cmap=cmap, extent=extent)
+    #     plt.colorbar(img2, ax=ax2, orientation='horizontal')
+    #     ax2.set_xlabel(r'X [mm]')
+    #     ax2.set_ylabel(r'Y [mm]')
+    #     ax2.set_title(r'Field aberrations PSF')
+    #     img2.set_clim(0, 1)
+    #
+    #     diff = field_PSF - nom_PSF
+    #     cmax = max(np.max(diff), -np.min(diff))
+    #     img3 = ax3.imshow(diff, origin='lower', cmap='seismic', extent=extent)
+    #     plt.colorbar(img3, ax=ax3, orientation='horizontal')
+    #     img3.set_clim(-cmax, cmax)
+    #     ax3.set_xlabel(r'X [mm]')
+    #     ax3.set_ylabel(r'Y [mm]')
+    #     ax3.set_title(r'Difference')
+    #
+    #     cmap = 'inferno'
+    #     img4 = ax4.imshow(np.log10(nom_PSF), origin='lower', cmap=cmap, extent=extent)
+    #     plt.colorbar(img4, ax=ax4, orientation='horizontal')
+    #     img4.set_clim(-6, 0)
+    #     ax4.set_xlabel(r'X [mm]')
+    #     ax4.set_ylabel(r'Y [mm]')
+    #     ax4.set_title(r'%s PSF [log]' % (name))
+    #
+    #     img5 = ax5.imshow(np.log10(field_PSF), origin='lower', cmap=cmap, extent=extent)
+    #     plt.colorbar(img5, ax=ax5, orientation='horizontal')
+    #     img5.set_clim(-6, 0)
+    #     ax5.set_xlabel(r'X [mm]')
+    #     ax5.set_ylabel(r'Y [mm]')
+    #     ax5.set_title(r'Field aberrations PSF [log]')
+    #
+    #     img6 = ax6.imshow(np.log10(np.abs(diff)), origin='lower', cmap='coolwarm', extent=extent)
+    #     plt.colorbar(img6, ax=ax6, orientation='horizontal')
+    #     img6.set_clim(-6, 0)
+    #     ax6.set_xlabel(r'X [mm]')
+    #     ax6.set_ylabel(r'Y [mm]')
+    #     ax6.set_title(r'Difference [log]')
+    #
+    #     plt.tight_layout()
+    # plt.show()
 
-    psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.01, wave_idx=1, defocus_pv=None)
-    psf_field /= pop_peak
+    N_PSF = 1000
+    PSF, zern_coef, _m = pop_analysis.generate_dataset(N_PSF=N_PSF, N_zernike=0, N_slices=9, z_max=None, wave_idx=wave_idx, defocus_pv=defocus_pv)
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
-    cmap = 'inferno'
-    # Nominal PSF (No Field Aberrations
-    img1 = ax1.imshow(psf, origin='lower', cmap=cmap, extent=extent)
-    plt.colorbar(img1, ax=ax1, orientation='horizontal')
+    np.save(os.path.join(zemax_path, 'PSF'), PSF)
+    np.save(os.path.join(zemax_path, 'zern_coef'), zern_coef)
+
+    peaks_nom = np.max(PSF[:, :, :, 0], axis=(1, 2))
+    peaks_foc = np.max(PSF[:, :, :, 1], axis=(1, 2))
+
+    train_PSF, test_PSF = PSF[:900], PSF[900:]
+    train_coef, test_coef = zern_coef[:900], zern_coef[900:]
+
+    layer_filers = [64, 32, 8, 8]  # How many filters per layer
+    pix = PSF.shape[1]
+    kernel_size = 3
+    input_shape = (pix, pix, 2,)
+    epochs = 50
+
+    # Initialize Convolutional Neural Network model for calibration
+    calibration_model = calibration.create_cnn_model(layer_filers, kernel_size, input_shape,
+                                                     N_classes=5, name='CALIBR', activation='relu')
+
+    # Train the calibration model
+    train_history = calibration_model.fit(x=train_PSF, y=train_coef,
+                                          validation_data=(test_PSF, test_coef),
+                                          epochs=epochs, batch_size=32, shuffle=True, verbose=1)
+
+    from numpy.linalg import norm
+    # Evaluate performance
+    guess_coef = calibration_model.predict(test_PSF)
+    residual_coef = test_coef - guess_coef
+    norm_before = np.mean(norm(test_coef, axis=1))
+    norm_after = np.mean(norm(residual_coef, axis=1))
+    print("\nPerformance:")
+    print("Average Norm Coefficients")
+    print("Before: %.4f" % norm_before)
+    print("After : %.4f" % norm_after)
+
+    def calculate_rms_wfe(zemax_coef):
+
+        N_PSF = zemax_coef.shape[0]
+        new_coef, rms = [], []
+        for k in range(N_PSF):
+            coef = pop_analysis.zernike.transform_zemax_coefficients(zemax_coef[k])
+            new_coef.append(coef)
+            phase = np.dot(pop_analysis.zernike.H_matrix, coef)
+            rms.append(np.std(phase[pop_analysis.zernike.pupil_mask]))
+        new_coef = np.array(new_coef)
+        rms = np.array(rms)
+
+        return new_coef, rms
+
+    nc, rms_before = calculate_rms_wfe(test_coef)
+    ncc, rms_after = calculate_rms_wfe(residual_coef)
+
+    # Field aberrations
+    PSF_field, zern_coef_field, mean_field_rms = pop_analysis.generate_dataset(N_PSF=100, N_zernike=N_zernike, N_slices=9,
+                                                               z_max=0.01, wave_idx=wave_idx, defocus_pv=defocus_pv)
+
+    guess_coef_field = calibration_model.predict(PSF_field)
+    residual_coef_field = zern_coef_field - guess_coef_field
+    norm_before_field = np.mean(norm(zern_coef_field, axis=1))
+    norm_after_field = np.mean(norm(residual_coef_field, axis=1))
+    print("\nPerformance:")
+    print("Average Norm Coefficients")
+    print("Before: %.4f" % norm_before_field)
+    print("After : %.4f" % norm_after_field)
+
+    nc, rms_before_field = calculate_rms_wfe(zern_coef_field)
+    ncc, rms_after_field = calculate_rms_wfe(residual_coef_field)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+
+    ax1.scatter(np.arange(100), rms_before)
+    ax1.scatter(np.arange(100), rms_after)
+    ax1.set_ylim([0, 0.10])
+    ax1.set_xlabel(r'Sample')
+    ax1.set_title(r'No Field Aberrations')
+
+    ax2.scatter(np.arange(10), rms_before_field)
+    ax2.scatter(np.arange(10), rms_after_field)
+    ax2.set_ylim([0, 0.10])
+    ax2.set_title(r'Field Aberrations | RMS($\psi$)=%.3f rad' % (np.mean(mean_field_rms)))
+    plt.show()
+
+
+    # fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
+    # cmap = 'inferno'
+    # # Nominal PSF (No Field Aberrations
+    # img1 = ax1.imshow(np.log10(psf), origin='lower', cmap=cmap, extent=extent)
+    # plt.colorbar(img1, ax=ax1, orientation='horizontal')
+    # # ax1.set_xlabel(r'X [mm]')
     # ax1.set_xlabel(r'X [mm]')
-    ax1.set_xlabel(r'X [mm]')
-    ax1.set_ylabel(r'Y [mm]')
+    # ax1.set_ylabel(r'Y [mm]')
+    #
+    # img2 = ax2.imshow(np.log10(psf_field), origin='lower', cmap=cmap, extent=extent)
+    # plt.colorbar(img2, ax=ax2, orientation='horizontal')
+    # ax2.set_xlabel(r'X [mm]')
+    # ax2.set_ylabel(r'Y [mm]')
+    #
+    # diff = psf_field - psf
+    # cmax = max(np.max(diff), -np.min(diff))
+    # img3 = ax3.imshow(diff, origin='lower', cmap='bwr', extent=extent)
+    # plt.colorbar(img3, ax=ax3, orientation='horizontal')
+    # img3.set_clim(-cmax, cmax)
+    # # img3.set_clim(-6, 0)
+    # plt.tight_layout()
+    # plt.show()
 
-    img2 = ax2.imshow(psf_field, origin='lower', cmap=cmap, extent=extent)
-    plt.colorbar(img2, ax=ax2, orientation='horizontal')
-    ax2.set_xlabel(r'X [mm]')
-    ax2.set_ylabel(r'Y [mm]')
+    #
 
-    diff = psf_field - psf
-    cmax = max(np.max(diff), -np.min(diff))
-    img3 = ax3.imshow(diff, origin='lower', cmap='bwr', extent=extent)
-    plt.colorbar(img3, ax=ax3, orientation='horizontal')
-    img3.set_clim(-cmax, cmax)
-    plt.tight_layout()
-    plt.show()
-
-    # 
-
-    from scipy.stats import reciprocal
-    a = 1e-5
-    b = 1e-1
-    r = reciprocal.rvs(a, b, size=500)
-
-    rms, mean_diff = [], []
-    for z in r:
-        psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=z, wave_idx=1,
-                                                             defocus_pv=None)
-        psf_field /= pop_peak
-        diff = psf_field - psf
-
-        rms.append(mean_rms)
-        mean_diff.append(np.mean(np.abs(diff)))
-        plt.close('all')
-
-    plt.figure()
-    plt.scatter(rms, mean_diff, s=2)
-    # plt.xscale('log')
-    plt.show()
+    # from scipy.stats import reciprocal
+    # a = 1e-5
+    # b = 1e-1
+    # r = reciprocal.rvs(a, b, size=500)
+    #
+    # rms, mean_diff = [], []
+    # for z in r:
+    #     psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=z, wave_idx=1,
+    #                                                          defocus_pv=None)
+    #     psf_field /= pop_peak
+    #     diff = psf_field - psf
+    #
+    #     rms.append(mean_rms)
+    #     mean_diff.append(np.mean(np.abs(diff)))
+    #     plt.close('all')
+    #
+    # plt.figure()
+    # plt.scatter(rms, mean_diff, s=2)
+    # # plt.xscale('log')
+    # plt.show()
 
 
 
