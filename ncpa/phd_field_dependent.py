@@ -10,10 +10,83 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from time import time
+import zernike as zern
 
 from win32com.client.gencache import EnsureDispatch, EnsureModule
 from win32com.client import constants
 from win32com.client import CastTo
+
+
+class ZernikePhase(object):
+
+    def __init__(self, N_zern):
+        N_PIX = 1024
+        x = np.linspace(-1, 1, N_PIX, endpoint=True)
+        xx, yy = np.meshgrid(x, x)
+        rho, theta = np.sqrt(xx ** 2 + yy ** 2), np.arctan2(xx, yy)
+        pupil = rho <= 1.0
+
+        rho, theta = rho[pupil], theta[pupil]
+        zernike = zern.ZernikeNaive(mask=pupil)
+        _phase = zernike(coef=np.zeros(N_zern), rho=rho, theta=theta, normalize_noll=False,
+                         mode='Jacobi', print_option='Silent')
+        H_flat = zernike.model_matrix[:, 3:]
+        self.H_matrix = zern.invert_model_matrix(H_flat, pupil)
+        self.pupil_mask = pupil
+        self.N_zern = self.H_matrix.shape[-1]
+
+    def transform_zemax_coefficients(self, zemax_coeff):
+        # Zemax Zernike Standard Phase: Defocus, horizontal Astig, oblique Astig, horizontal Coma, vertical Coma,
+        # H_matrix: [-] oblique Astig, defocus, horiz Astig, oblique trefoil, horizontal coma
+
+        # Dictionary that maps the Zemax coefficients to the H_matrix
+        zemax_dict = {0: [1, 0],    # Defocus
+                      1: [2, 1],    # Horizontal Astigmatism [sign flipped]
+                      2: [0, 1],    # Oblique Astigmatism [s f]
+                      3: [4, 0],    # Horizontal Coma
+                      4: [5, 1],    # Vertical Coma [s f]
+                      5: [9, 0],    # Spherical
+                      6: [3, 1],    # Oblique Trefoil [s f]
+                      7: [6, 0],    # Horizontal Trefoil
+                      8: [10, 1],   # Secondary Horizontal Coma [s f]
+                      9: [8, 1],    # Secondary Oblique Coma [s f]
+                      10: [14, 0],  # Other coma
+                      11: [15, 1],  # Other coma [s f]
+                      }
+
+        N_zemax = zemax_coeff.shape[0]
+        zern_coef = np.zeros(self.N_zern)
+        for i in range(N_zemax):
+            h_index, sign_k = zemax_dict[i]
+            zern_coef[h_index] = (-1) ** sign_k * zemax_coeff[i]
+        return zern_coef
+
+    def show_phase(self, zemax_coef):
+        N_config = zemax_coef.shape[0]
+        RMS = []
+        fig, axes = plt.subplots(1, N_config)
+        maxes = []
+        for j_config in range(N_config):
+            zern_coef = self.transform_zemax_coefficients(zemax_coef[j_config])
+            phase = np.dot(self.H_matrix, zern_coef)
+            rms = np.std(phase[self.pupil_mask])
+            RMS.append(rms)
+            cmax = max(np.max(phase), -np.min(phase))
+            maxes.append(cmax)
+
+        MAX = np.max(maxes)
+        for j_config in range(N_config):
+            zern_coef = self.transform_zemax_coefficients(zemax_coef[j_config])
+            phase = np.dot(self.H_matrix, zern_coef)
+            ax = axes[j_config]
+            img = ax.imshow(phase, cmap='RdBu')
+            img.set_clim(-MAX, MAX)
+            # plt.colorbar(img, ax=ax)
+            ax.axes.xaxis.set_visible(False)
+            ax.axes.yaxis.set_visible(False)
+
+        mean_RMS = np.mean(RMS)
+        return mean_RMS
 
 
 # Taken from Zemax example code
@@ -106,10 +179,10 @@ class PythonStandaloneApplication(object):
 
 class POPAnalysis(object):
 
-    def __init__(self, zosapi):
+    def __init__(self, zosapi, N_pix):
 
         self.zosapi = zosapi
-        self.N_pix = 512
+        self.N_pix = N_pix
 
         self.pm_zernike = 33        # The Surface number for the Zernike phase at the Pupil Mirror
 
@@ -122,6 +195,8 @@ class POPAnalysis(object):
                               '+13': 43, '+14': 33, '+15': 41}
 
     def set_field_aberrations(self, system, N_zernike, N_slices, z_max):
+
+        self.zernike = ZernikePhase(N_zern=20)
 
         MCE = system.MCE  # Multi Configuration Editor
         LDE = system.LDE  # Lens Data Editor
@@ -161,8 +236,10 @@ class POPAnalysis(object):
         #         val = op.GetOperandCell(config).DoubleValue
         #         print(val)
         # self.zosapi.CloseFile(save=True)
+        # for j, config in enumerate(configs):
+        mean_rms = self.zernike.show_phase(zern_coef)
 
-        return
+        return mean_rms
 
     def run_pop(self, system, settings, defocus_pv=None):
 
@@ -305,8 +382,11 @@ class POPAnalysis(object):
         # Get some info on the system
         system = self.zosapi.TheSystem  # The Optical System
 
-        # Set the Field-dependent aberrations
-        self.set_field_aberrations(system, N_zernike, N_slices, z_max=z_max)
+        if z_max != 0.0:
+            # Set the Field-dependent aberrations
+            mean_rms = self.set_field_aberrations(system, N_zernike, N_slices, z_max=z_max)
+        else:
+            mean_rms = 0.0
 
         delta = (N_slices - 1) // 2
         config_keys = ['-%d' % (i + 1) for i in range(delta)] + ['Central'] + ['+%d' % (i + 1) for i in range(delta)]
@@ -326,11 +406,23 @@ class POPAnalysis(object):
 
         pop_psf = self.fix_anamorph(pop_psf)
 
-        pop_peak = np.max(pop_psf)
-        pop_psf /= pop_peak
-
         self.zosapi.CloseFile(save=False)
-        return pop_psf
+        return pop_psf, mean_rms
+#
+# def zernike_phase(coef):
+#
+#     N_PIX = 1024
+#     x = np.linspace(-1, 1, N_PIX, endpoint=True)
+#     xx, yy = np.meshgrid(x, x)
+#     rho, theta = np.sqrt(xx ** 2 + yy ** 2), np.arctan2(xx, yy)
+#     pupil = rho <= 1.0
+#
+#     rho, theta = rho[pupil], theta[pupil]
+#     zernike = zern.ZernikeNaive(mask=pupil)
+#     _phase = zernike(coef=np.zeros(N_zern), rho=rho / (radial_oversize * rho_aper), theta=theta, normalize_noll=False,
+#                      mode='Jacobi', print_option='Silent')
+#     H_flat = zernike.model_matrix[:, 3:]
+#     H_matrix = zern.invert_model_matrix(H_flat, pupil)
 
 
 if __name__ == """__main__""":
@@ -346,12 +438,64 @@ if __name__ == """__main__""":
     psa = PythonStandaloneApplication()
 
     #
-    pop_analysis = POPAnalysis(zosapi=psa)
+    N_pix = 512
+    pop_analysis = POPAnalysis(zosapi=psa, N_pix=N_pix)
 
-    N_zernike = 2
+    N_zernike = 12
     N_slices = 7
-    psf = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.0, wave_idx=1, defocus_pv=None)
-    psf_field = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.05, wave_idx=1, defocus_pv=None)
+    width = N_slices * 0.130
+    extent = [-width/2, width/2, -width/2, width/2]
+    psf, _r = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.0, wave_idx=1, defocus_pv=None)
+    pop_peak = np.max(psf)
+    psf /= pop_peak
+
+    psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.01, wave_idx=1, defocus_pv=None)
+    psf_field /= pop_peak
+
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
+    cmap = 'inferno'
+    # Nominal PSF (No Field Aberrations
+    img1 = ax1.imshow(psf, origin='lower', cmap=cmap, extent=extent)
+    plt.colorbar(img1, ax=ax1, orientation='horizontal')
+    # ax1.set_xlabel(r'X [mm]')
+    ax1.set_xlabel(r'X [mm]')
+    ax1.set_ylabel(r'Y [mm]')
+
+    img2 = ax2.imshow(psf_field, origin='lower', cmap=cmap, extent=extent)
+    plt.colorbar(img2, ax=ax2, orientation='horizontal')
+    ax2.set_xlabel(r'X [mm]')
+    ax2.set_ylabel(r'Y [mm]')
+
+    diff = psf_field - psf
+    cmax = max(np.max(diff), -np.min(diff))
+    img3 = ax3.imshow(diff, origin='lower', cmap='bwr', extent=extent)
+    plt.colorbar(img3, ax=ax3, orientation='horizontal')
+    img3.set_clim(-cmax, cmax)
+    plt.tight_layout()
+    plt.show()
+
+    # 
+
+    from scipy.stats import reciprocal
+    a = 1e-5
+    b = 1e-1
+    r = reciprocal.rvs(a, b, size=500)
+
+    rms, mean_diff = [], []
+    for z in r:
+        psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=z, wave_idx=1,
+                                                             defocus_pv=None)
+        psf_field /= pop_peak
+        diff = psf_field - psf
+
+        rms.append(mean_rms)
+        mean_diff.append(np.mean(np.abs(diff)))
+        plt.close('all')
+
+    plt.figure()
+    plt.scatter(rms, mean_diff, s=2)
+    # plt.xscale('log')
+    plt.show()
 
 
-    # system = pop_analysis.set_field_aberrations(N_zernike=2, N_slices=5)
+
