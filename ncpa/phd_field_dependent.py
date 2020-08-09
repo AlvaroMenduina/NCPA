@@ -1,6 +1,33 @@
 """
 Effect of field-dependent aberrations on the PSF for HARMONI
 
+    ** Introduction **
+Once the beam hits the Image Slicer, its split into several slices
+each following an independent optical path. This can introduce some
+field-depedent aberrations that will affect the final PSF
+
+For example, if one of the pupil mirrors has a defocus error, this will
+affect only a fraction of the PSF. Since the NCPA calibration can only
+provide a single correction for the whole pupil, these field-dependent
+aberrations are effectively impossible to correct.
+
+However, that does not mean that we don't care about them. If we train the
+machine learning calibration models on PSF images without field dependent aberrations
+but test the performance on a real system that has them, we could bias our
+predictions.
+
+This is what we want to characterize with this code
+
+    ** Methodology **
+We use the HARMONI IFU (with Field Splitter) Zemax file to run POP simulations
+We place a Zernike phase surface at the Pupil Mirrors, whose Zernike coefficients
+are controlled with the Multi-Configuration Editor. This allows us to add
+different wavefront maps to each Slice (configuration), introducing field-dependent
+aberrations
+
+The first thing we analyse is how this affects the PSF, i.e. how does a PSF with
+field-dependent aberrations compare to the nominal system PSF (both focused and defocused)
+
 Author: Alvaro Menduina
 Date: August 2020
 """
@@ -8,10 +35,9 @@ Date: August 2020
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from time import time
 import zernike as zern
-
 import calibration
 
 from win32com.client.gencache import EnsureDispatch, EnsureModule
@@ -20,8 +46,17 @@ from win32com.client import CastTo
 
 
 class ZernikePhase(object):
-
+    """
+    Object to deal with the Zernike wavefronts,
+    calculate RMS values, show wavefront plots, etc.
+    """
     def __init__(self, N_zern):
+        """
+        Initialize useful stuff for later
+        :param N_zern: maximum number of Zernike polynomials to consider
+        """
+
+        # Define a circular pupil mask
         N_PIX = 1024
         x = np.linspace(-1, 1, N_PIX, endpoint=True)
         xx, yy = np.meshgrid(x, x)
@@ -32,16 +67,35 @@ class ZernikePhase(object):
         zernike = zern.ZernikeNaive(mask=pupil)
         _phase = zernike(coef=np.zeros(N_zern), rho=rho, theta=theta, normalize_noll=False,
                          mode='Jacobi', print_option='Silent')
-        H_flat = zernike.model_matrix[:, 3:]
+        H_flat = zernike.model_matrix[:, 3:]        # remove Piston and the 2 Tilts
+        # H_matrix is the matrix of Zernike polynomials, shape [N_pix, N_pix, N_zern]
         self.H_matrix = zern.invert_model_matrix(H_flat, pupil)
         self.pupil_mask = pupil
+        # We generate a Zernike pyramid necessary to cover AT LEAST the defined N_zern
+        # so after creating the H_matrix the 'total' N_zern changes
         self.N_zern = self.H_matrix.shape[-1]
 
+        return
+
     def transform_zemax_coefficients(self, zemax_coeff):
-        # Zemax Zernike Standard Phase: Defocus, horizontal Astig, oblique Astig, horizontal Coma, vertical Coma,
+        """
+        The Zemax file uses Zernike Fringe Phase as the surface to add Zernike polymonials
+        This follows a different ordering to the H_matrix in ZernikePhase, which just
+        reads the Zernike pyramid from left to right, looping over the rows
+
+        So the zemax_coeff that we use to define a wavefront in the Zemax file needs to be
+        reordered if we want to use the H_matrix to calculate RMS values or show plots
+        in Python
+
+        :param zemax_coeff:
+        :return:
+        """
+
+        # Zemax Zernike Fringe Phase: Defocus, horizontal Astig, oblique Astig, horizontal Coma, vertical Coma,
         # H_matrix: [-] oblique Astig, defocus, horiz Astig, oblique trefoil, horizontal coma
 
-        # Dictionary that maps the Zemax coefficients to the H_matrix
+        # Dictionary that maps the Zemax coefficients to the H_matrix | i_zemax : [h_index, sign_k]
+        # Sometimes the sign of the Zernike polynomial is flipped so we do (-1)^(sign_k)
         zemax_dict = {0: [1, 0],    # Defocus
                       1: [2, 1],    # Horizontal Astigmatism [sign flipped]
                       2: [0, 1],    # Oblique Astigmatism [s f]
@@ -61,33 +115,51 @@ class ZernikePhase(object):
         for i in range(N_zemax):
             h_index, sign_k = zemax_dict[i]
             zern_coef[h_index] = (-1) ** sign_k * zemax_coeff[i]
+
         return zern_coef
 
-    def show_phase(self, zemax_coef):
+    def show_field_phase(self, zemax_coef, plot=False):
+        """
+        Show the Field Dependent wavefront maps for all the slices involved
+        :param zemax_coef: [N_configs, N_zern] Zernike coefficients for each slice
+        :return:
+        """
         N_config = zemax_coef.shape[0]
-        RMS = []
-        fig, axes = plt.subplots(1, N_config)
-        maxes = []
+        RMS = []        # list of RMS for each wavefront
+        maxes = []      # list of maximum values of each wavefront
         for j_config in range(N_config):
+            # We loop throw all slices once to get the maximum value of the wavefront
             zern_coef = self.transform_zemax_coefficients(zemax_coef[j_config])
             phase = np.dot(self.H_matrix, zern_coef)
             rms = np.std(phase[self.pupil_mask])
             RMS.append(rms)
             cmax = max(np.max(phase), -np.min(phase))
             maxes.append(cmax)
+        MAX = np.max(maxes)  # The maximum of all maximums, to rescale all plots to the same limit
 
-        MAX = np.max(maxes)
-        for j_config in range(N_config):
-            zern_coef = self.transform_zemax_coefficients(zemax_coef[j_config])
-            phase = np.dot(self.H_matrix, zern_coef)
-            ax = axes[j_config]
-            img = ax.imshow(phase, cmap='RdBu')
-            img.set_clim(-MAX, MAX)
-            # plt.colorbar(img, ax=ax)
-            ax.axes.xaxis.set_visible(False)
-            ax.axes.yaxis.set_visible(False)
+        if plot == True:
+            # Only show plot if specified, otherwise when we create a 1000 PSFs
+            # we'll die buried in Figures
+            fig, axes = plt.subplots(1, N_config)
+            for j_config in range(N_config):
+                # we loop a second time to construct the plot
+                zern_coef = self.transform_zemax_coefficients(zemax_coef[j_config])
+                phase = np.dot(self.H_matrix, zern_coef)
+                ax = axes[j_config]
+                img = ax.imshow(phase, cmap='RdBu')
+                img.set_clim(-MAX, MAX)
 
+                ax.axes.xaxis.set_visible(False)
+                ax.axes.yaxis.set_visible(False)
+                if j_config == N_config:
+                    divider = make_axes_locatable(ax)
+                    cax = divider.append_axes("right", size="5%", pad=0.05)
+                    fig.colorbar(img, cax=cax)
+                    ax.set_title(r'$\Psi$ [rad]')
+
+        # We calculate the mean RMS of the field-dependent wavefront
         mean_RMS = np.mean(RMS)
+
         return mean_RMS
 
 
@@ -184,10 +256,11 @@ class POPAnalysis(object):
     def __init__(self, zosapi, N_pix):
 
         self.zosapi = zosapi
-        self.N_pix = N_pix
-
+        self.N_pix = N_pix          # How many pixels to use in POP
+        self.zernike = ZernikePhase(N_zern=20)
         self.pm_zernike = 33        # The Surface number for the Zernike phase at the Pupil Mirror
 
+        # A Dictionary containing the ordering for the PSF slices in Zemax
         self.config_slices = {'-15': 71, '-14': 5, '-13': 69,
                               '-12': 7, '-11': 67, '-10': 9, '-9': 65, '-8': 11, '-7': 63,
                               '-6': 13, '-5': 61, '-4': 15, '-3': 59, '-2': 17, '-1': 57,
@@ -196,14 +269,23 @@ class POPAnalysis(object):
                               '+7': 49, '+8': 27, '+9': 47, '+10': 29, '+11': 45, '+12': 31,
                               '+13': 43, '+14': 33, '+15': 41}
 
-    def set_field_aberrations(self, system, N_zernike, N_slices, z_max):
+    def set_field_aberrations(self, system, N_zernike, N_slices, z_max, plot=False):
+        """
+        Using the Multi-Configuration Editor, we add field-dependent aberrations
+        at the Pupil Mirror, by changing the Zernike coefficients for each slice (configuration)
 
-        self.zernike = ZernikePhase(N_zern=20)
+        :param system: Zemax optical system
+        :param N_zernike: how many Zernike polynomials (from defocus onwards)
+        :param N_slices: how many slices are we using to run POP
+        :param z_max: intensity of the Zernike coefficients, in radians
+        :param plot: whether to plot the wavefronts for the field-dependent aberrations
+        :return:
+        """
 
         MCE = system.MCE  # Multi Configuration Editor
         LDE = system.LDE  # Lens Data Editor
 
-        # check that we are looking at the proper Zemax surface
+        # First, check that we are looking at the proper Zemax surface
         PM_Zernike = LDE.GetSurfaceAt(self.pm_zernike).Comment
         if PM_Zernike != "PM Zernike":
             raise ValueError("Surface #%d is not the PM Zernike" % self.pm_zernike)
@@ -212,26 +294,28 @@ class POPAnalysis(object):
         delta = (N_slices - 1) // 2
         config_keys = ['-%d' % (i + 1) for i in range(delta)] + ['Central'] + ['+%d' % (i + 1) for i in range(delta)]
         configs = [pop_analysis.config_slices[key] for key in config_keys]
-        print(configs)
 
         # Create a set of random Zernike polynomials for each slice
         zern_coef = np.random.uniform(low=-z_max, high=z_max, size=(N_slices, N_zernike))
 
         # Check how many Operands we have in the MCE already
-        Nops = MCE.NumberOfOperands
-        print(MCE.NumberOfOperands)
+        # Nops = MCE.NumberOfOperands
+        # print(MCE.NumberOfOperands)
         for k in range(N_zernike):
+            # We add Operands PRAM that allows us to change the Parameter of a Surface
+            # and give it a value for each configuration
+            # Each PRAM represents the Zernike coefficient of the Zernike Phase Surface
             zernike_op = MCE.AddOperand()
             zernike_op.ChangeType(constants.MultiConfigOperandType_PRAM)
             zernike_op.Param1 = self.pm_zernike         # the Surface
             zernike_op.Param2 = 19 + k                  # the Parameter. In this case the Zernike polynomial
             # We start at Param19 as that is the Zernike Defocus
 
-            # Set the values of the Zernike coefficients for each slices
+            # Set the values of the Zernike coefficients for each slice
             for j, config in enumerate(configs):
+                # This is where we make the aberrations field-dependent by giving one value to each slice
                 zernike_op.GetOperandCell(config).DoubleValue = zern_coef[j, k]
 
-        print(MCE.NumberOfOperands)
         # for k in range(N_zernike):
         #     op = MCE.GetOperandAt(Nops + k + 1)
         #     for j, config in enumerate(configs):
@@ -239,9 +323,11 @@ class POPAnalysis(object):
         #         print(val)
         # self.zosapi.CloseFile(save=True)
         # for j, config in enumerate(configs):
-        mean_rms = self.zernike.show_phase(zern_coef)
 
-        return mean_rms
+        # Get the average value of the RMS of the field-dependent aberrations
+        mean_rms_field = self.zernike.show_field_phase(zern_coef, plot=plot)
+
+        return mean_rms_field
 
     def run_pop(self, system, settings, defocus_pv=None):
 
@@ -369,7 +455,6 @@ class POPAnalysis(object):
         The PSF at the exit slit is anarmophic, elongated along Y [across slices]
         we have to resample along that direction to go back to symmetric PSFs
         :param pop_psf:
-        :param pop_extent:
         :return:
         """
 
@@ -387,11 +472,15 @@ class POPAnalysis(object):
         return new_psf
 
     def add_ncpa(self, system, zern_coef):
+        """
+        Add NCPA at the entrance pupil
+        At the moment, we just add Defocus, Astigmatism and Coma
+        :param system:
+        :param zern_coef:
+        :return:
+        """
 
         zernike_phase = system.LDE.GetSurfaceAt(2)
-        z_max = 0.20
-        N = 5
-        # zern_coef = np.random.uniform(low=-z_max, high=z_max, size=N)
         # 15 is Piston, 18 is Defocus, 19 is Astigmatism
         print("Adding NCPA")
         zernike_phase.GetSurfaceCell(constants.SurfaceColumn_Par18).DoubleValue = zern_coef[0]
@@ -402,24 +491,29 @@ class POPAnalysis(object):
 
         return
 
-    def calculate_pop_psf(self, N_zernike, N_slices, z_max, zern_coef=None, wave_idx=1, defocus_pv=None):
+    def calculate_pop_psf(self, opt_system=None, wave_idx=1, zern_coef=None, defocus_pv=None, N_slices=9,
+                          N_zernike_field=12, z_field_max=None, plot_field=False):
 
-        # check that the file name is correct and the zemax file exists
-        if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
-            raise FileExistsError("%s does NOT exist" % zemax_file)
+        if opt_system is None:
+            # check that the file name is correct and the zemax file exists
+            if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
+                raise FileExistsError("%s does NOT exist" % zemax_file)
 
-        print("\nOpening Zemax File: ", zemax_file)
-        self.zosapi.OpenFile(os.path.join(zemax_path, zemax_file), False)
+            print("\nOpening Zemax File: ", zemax_file)
+            self.zosapi.OpenFile(os.path.join(zemax_path, zemax_file), False)
 
-        # Get some info on the system
-        system = self.zosapi.TheSystem  # The Optical System
+            # Get some info on the system
+            system = self.zosapi.TheSystem  # The Optical System
+        else:
+            system = opt_system
 
         # Set the Field-dependent aberrations
-        if z_max is None:
-            mean_rms = 0.0
+        if z_field_max is None:
+            mean_rms_field = 0.0
         else:
             print("Adding Field Dependent Aberrations")
-            mean_rms = self.set_field_aberrations(system, N_zernike, N_slices, z_max=z_max)
+            mean_rms_field = self.set_field_aberrations(system=system, N_zernike=N_zernike_field, N_slices=N_slices,
+                                                        z_max=z_field_max, plot=plot_field)
 
         # Add NCPA aberrations at the entrace pupil
         if zern_coef is not None:
@@ -456,11 +550,21 @@ class POPAnalysis(object):
 
         pop_psf_foc = self.fix_anamorph(pop_psf_foc)
 
-        self.zosapi.CloseFile(save=False)
+        if opt_system is None:
+            self.zosapi.CloseFile(save=False)
 
-        return pop_psf, pop_psf_foc, mean_rms
+        return pop_psf, pop_psf_foc, mean_rms_field
 
-    def generate_dataset(self, N_PSF, N_zernike, N_slices, z_max, wave_idx, defocus_pv):
+    def generate_dataset(self, N_PSF, wave_idx, defocus_pv, N_slices, N_zernike_field, z_field_max):
+
+        if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
+            raise FileExistsError("%s does NOT exist" % zemax_file)
+
+        print("\nOpening Zemax File: ", zemax_file)
+        self.zosapi.OpenFile(os.path.join(zemax_path, zemax_file), False)
+
+        # Get some info on the system
+        system = self.zosapi.TheSystem  # The Optical System
 
         z = 0.10
         zern_coef = np.random.uniform(low=-z, high=z, size=(N_PSF, 5))
@@ -470,16 +574,19 @@ class POPAnalysis(object):
             if k % 50 == 0:
                 print("PSF #%d / %d" % (k + 1, N_PSF))
             coef = zern_coef[k]
-            psf_nom, psf_foc, _rms = self.calculate_pop_psf(N_zernike=N_zernike, N_slices=N_slices, z_max=z_max,
-                                                            zern_coef=coef, wave_idx=wave_idx, defocus_pv=defocus_pv)
+            psf_nom, psf_foc, _rms = self.calculate_pop_psf(opt_system=system, wave_idx=wave_idx, zern_coef=coef, defocus_pv=defocus_pv,
+                                                            N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                            z_field_max=z_field_max, plot_field=False)
             PSF_array[k, :, :, 0] = psf_nom
             PSF_array[k, :, :, 1] = psf_foc
             mean_field_rms.append(_rms)
 
-        PEAK = np.max(PSF_array[:, :, :, 0])
-        PSF_array /= PEAK
+        # PEAK = np.max(PSF_array[:, :, :, 0])
+        PSF_array /= pop_peak
 
         mean_field_rms = np.array(mean_field_rms)
+
+        self.zosapi.CloseFile(save=False)
 
         return PSF_array, zern_coef, mean_field_rms
 
@@ -503,83 +610,108 @@ if __name__ == """__main__""":
     wavelength = waves_dict[wave_idx]
     pop_analysis = POPAnalysis(zosapi=psa, N_pix=N_pix)
 
-    N_zernike = 12
+    N_zernike_field = 12
     N_slices = 9
     width = N_slices * 0.130
     extent = [-width/2, width/2, -width/2, width/2]
-    #
-    # # Nominal PSF (no aberrations)
-    # psf, psf_foc, _r = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=None, wave_idx=wave_idx, defocus_pv=defocus_pv)
-    # pop_peak = np.max(psf)
-    # psf /= pop_peak
-    # psf_foc /= pop_peak
-    #
-    # psf_field, psf_field_foc, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=0.01,
-    #                                                                     wave_idx=wave_idx, defocus_pv=defocus_pv)
-    # psf_field /= pop_peak
-    # psf_field_foc /= pop_peak
-    #
-    # for nom_PSF, field_PSF, name in zip([psf, psf_foc], [psf_field, psf_field_foc], ['Nominal', 'Defocus']):
-    #
-    #     fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
-    #     cmap = 'inferno'
-    #     # Nominal PSF (No Field Aberrations
-    #     img1 = ax1.imshow((nom_PSF), origin='lower', cmap=cmap, extent=extent)
-    #     plt.colorbar(img1, ax=ax1, orientation='horizontal')
-    #     ax1.set_xlabel(r'X [mm]')
-    #     ax1.set_ylabel(r'Y [mm]')
-    #     ax1.set_title(r'%s PSF $\lambda$ = %.2f $\mu$m' % (name, wavelength))
-    #     img1.set_clim(0, 1)
-    #
-    #     img2 = ax2.imshow((field_PSF), origin='lower', cmap=cmap, extent=extent)
-    #     plt.colorbar(img2, ax=ax2, orientation='horizontal')
-    #     ax2.set_xlabel(r'X [mm]')
-    #     ax2.set_ylabel(r'Y [mm]')
-    #     ax2.set_title(r'Field aberrations PSF')
-    #     img2.set_clim(0, 1)
-    #
-    #     diff = field_PSF - nom_PSF
-    #     cmax = max(np.max(diff), -np.min(diff))
-    #     img3 = ax3.imshow(diff, origin='lower', cmap='seismic', extent=extent)
-    #     plt.colorbar(img3, ax=ax3, orientation='horizontal')
-    #     img3.set_clim(-cmax, cmax)
-    #     ax3.set_xlabel(r'X [mm]')
-    #     ax3.set_ylabel(r'Y [mm]')
-    #     ax3.set_title(r'Difference')
-    #
-    #     cmap = 'inferno'
-    #     img4 = ax4.imshow(np.log10(nom_PSF), origin='lower', cmap=cmap, extent=extent)
-    #     plt.colorbar(img4, ax=ax4, orientation='horizontal')
-    #     img4.set_clim(-6, 0)
-    #     ax4.set_xlabel(r'X [mm]')
-    #     ax4.set_ylabel(r'Y [mm]')
-    #     ax4.set_title(r'%s PSF [log]' % (name))
-    #
-    #     img5 = ax5.imshow(np.log10(field_PSF), origin='lower', cmap=cmap, extent=extent)
-    #     plt.colorbar(img5, ax=ax5, orientation='horizontal')
-    #     img5.set_clim(-6, 0)
-    #     ax5.set_xlabel(r'X [mm]')
-    #     ax5.set_ylabel(r'Y [mm]')
-    #     ax5.set_title(r'Field aberrations PSF [log]')
-    #
-    #     img6 = ax6.imshow(np.log10(np.abs(diff)), origin='lower', cmap='coolwarm', extent=extent)
-    #     plt.colorbar(img6, ax=ax6, orientation='horizontal')
-    #     img6.set_clim(-6, 0)
-    #     ax6.set_xlabel(r'X [mm]')
-    #     ax6.set_ylabel(r'Y [mm]')
-    #     ax6.set_title(r'Difference [log]')
-    #
-    #     plt.tight_layout()
-    # plt.show()
 
-    N_PSF = 1000
-    PSF, zern_coef, _m = pop_analysis.generate_dataset(N_PSF=N_PSF, N_zernike=0, N_slices=9, z_max=None, wave_idx=wave_idx, defocus_pv=defocus_pv)
+    # ================================================================================================================ #
+    #    Effect of Field-dependent aberrations on the nominal and defocused PSF [No NCPA]
+    # ================================================================================================================ #
 
-    np.save(os.path.join(zemax_path, 'PSF'), PSF)
-    np.save(os.path.join(zemax_path, 'zern_coef'), zern_coef)
+    # Nominal PSF (no aberrations)
+    psf, psf_foc, _r = pop_analysis.calculate_pop_psf(wave_idx=wave_idx, zern_coef=None, defocus_pv=defocus_pv,
+                                                      N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                      z_field_max=None, plot_field=False)
+    pop_peak = np.max(psf)
+    psf /= pop_peak
+    psf_foc /= pop_peak
+
+    results = pop_analysis.calculate_pop_psf(wave_idx=wave_idx, zern_coef=None, defocus_pv=defocus_pv,
+                                                      N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                      z_field_max=0.01, plot_field=True)
+
+    psf_field, psf_field_foc, mean_rms_field = results
+    psf_field /= pop_peak
+    psf_field_foc /= pop_peak
+
+    for nom_PSF, field_PSF, name in zip([psf, psf_foc], [psf_field, psf_field_foc], ['Nominal', 'Defocus']):
+
+        fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
+        cmap = 'inferno'
+        # Nominal PSF (No Field Aberrations
+        img1 = ax1.imshow((nom_PSF), origin='lower', cmap=cmap, extent=extent)
+        plt.colorbar(img1, ax=ax1, orientation='horizontal')
+        ax1.set_xlabel(r'X [mm]')
+        ax1.set_ylabel(r'Y [mm]')
+        ax1.set_title(r'%s PSF $\lambda$ = %.2f $\mu$m' % (name, wavelength))
+        img1.set_clim(0, 1)
+
+        img2 = ax2.imshow((field_PSF), origin='lower', cmap=cmap, extent=extent)
+        plt.colorbar(img2, ax=ax2, orientation='horizontal')
+        ax2.set_xlabel(r'X [mm]')
+        ax2.set_ylabel(r'Y [mm]')
+        ax2.set_title(r'Field aberrations PSF')
+        img2.set_clim(0, 1)
+
+        diff = field_PSF - nom_PSF
+        cmax = max(np.max(diff), -np.min(diff))
+        img3 = ax3.imshow(diff, origin='lower', cmap='seismic', extent=extent)
+        plt.colorbar(img3, ax=ax3, orientation='horizontal')
+        img3.set_clim(-cmax, cmax)
+        ax3.set_xlabel(r'X [mm]')
+        ax3.set_ylabel(r'Y [mm]')
+        ax3.set_title(r'Difference')
+
+        cmap = 'inferno'
+        img4 = ax4.imshow(np.log10(nom_PSF), origin='lower', cmap=cmap, extent=extent)
+        plt.colorbar(img4, ax=ax4, orientation='horizontal')
+        img4.set_clim(-6, 0)
+        ax4.set_xlabel(r'X [mm]')
+        ax4.set_ylabel(r'Y [mm]')
+        ax4.set_title(r'%s PSF [log]' % (name))
+
+        img5 = ax5.imshow(np.log10(field_PSF), origin='lower', cmap=cmap, extent=extent)
+        plt.colorbar(img5, ax=ax5, orientation='horizontal')
+        img5.set_clim(-6, 0)
+        ax5.set_xlabel(r'X [mm]')
+        ax5.set_ylabel(r'Y [mm]')
+        ax5.set_title(r'Field aberrations PSF [log]')
+
+        img6 = ax6.imshow(np.log10(np.abs(diff)), origin='lower', cmap='coolwarm', extent=extent)
+        plt.colorbar(img6, ax=ax6, orientation='horizontal')
+        img6.set_clim(-6, 0)
+        ax6.set_xlabel(r'X [mm]')
+        ax6.set_ylabel(r'Y [mm]')
+        ax6.set_title(r'Difference [log]')
+
+        plt.tight_layout()
+    plt.show()
+
+    # ================================================================================================================ #
+    #    Machine Learning bits
+    # ================================================================================================================ #
+
+    # We create a dataset of PSF images with NCPA but WITHOUT Field-Dependent aberrations
+    N_train, N_test = 9, 1
+    N_PSF = N_train + N_test
+    PSF, zern_coef, _m = pop_analysis.generate_dataset(N_PSF=N_PSF, wave_idx=wave_idx, defocus_pv=defocus_pv,
+                                                       N_slices=N_slices, N_zernike_field=0, z_field_max=None)
+
+
+    # np.save(os.path.join(zemax_path, 'PSF'), PSF)
+    # np.save(os.path.join(zemax_path, 'zern_coef'), zern_coef)
+
+    # PSF = np.load(os.path.join(zemax_path, 'PSF.npy'))
+    # zern_coef = np.load(os.path.join(zemax_path, 'zern_coef.npy'))
 
     peaks_nom = np.max(PSF[:, :, :, 0], axis=(1, 2))
     peaks_foc = np.max(PSF[:, :, :, 1], axis=(1, 2))
+    plt.figure()
+    plt.scatter(np.arange(N_PSF), peaks_nom)
+    plt.scatter(np.arange(N_PSF), peaks_foc)
+    plt.ylim([0, 1])
+    plt.show()
 
     train_PSF, test_PSF = PSF[:900], PSF[900:]
     train_coef, test_coef = zern_coef[:900], zern_coef[900:]
@@ -645,17 +777,60 @@ if __name__ == """__main__""":
 
     fig, (ax1, ax2) = plt.subplots(1, 2)
 
-    ax1.scatter(np.arange(100), rms_before)
-    ax1.scatter(np.arange(100), rms_after)
+    ax1.scatter(np.arange(100), rms_before, s=5)
+    ax1.scatter(np.arange(100), rms_after, s=5)
     ax1.set_ylim([0, 0.10])
     ax1.set_xlabel(r'Sample')
     ax1.set_title(r'No Field Aberrations')
 
-    ax2.scatter(np.arange(10), rms_before_field)
-    ax2.scatter(np.arange(10), rms_after_field)
+    ax2.scatter(np.arange(100), rms_before_field, s=5)
+    ax2.scatter(np.arange(100), rms_after_field, s=5)
     ax2.set_ylim([0, 0.10])
-    ax2.set_title(r'Field Aberrations | RMS($\psi$)=%.3f rad' % (np.mean(mean_field_rms)))
+    # ax2.set_title(r'Field Aberrations | RMS($\psi$)=%.3f rad' % (np.mean(mean_field_rms)))
     plt.show()
+
+    # rr = [0.001, 0.005, 0.01, 0.015, 0.020, 0.025]
+    N = 100
+    rr = np.linspace(0.001, 0.05, N)
+    RMS_field_aber = []
+    RMS_before, RMS_after = [], []
+    for z in rr:
+
+        PSF_field, zern_coef_field, mean_field_rms = pop_analysis.generate_dataset(N_PSF=5, N_zernike=N_zernike,
+                                                                                   N_slices=9,
+                                                                                   z_max=z, wave_idx=wave_idx,
+                                                                                   defocus_pv=defocus_pv)
+
+        # The mean of the RMS for the Field Aberrations in the dataset
+        RMS_field_aber.extend(mean_field_rms)
+
+        guess_coef_field = calibration_model.predict(PSF_field)
+        residual_coef_field = zern_coef_field - guess_coef_field
+
+        nc, rms_before = calculate_rms_wfe(zern_coef_field)
+        ncc, rms_after = calculate_rms_wfe(residual_coef_field)
+
+        RMS_before.extend(rms_before)
+        RMS_after.extend(rms_after)
+
+    XMAX = np.max(RMS_field_aber)
+    x = np.linspace(0, XMAX, 10)
+
+    plt.close('all')
+    plt.figure()
+    plt.scatter(RMS_field_aber, RMS_before, s=10, label='Before')
+    plt.scatter(RMS_field_aber, RMS_after, s=10, label='After')
+    plt.plot(x, x, linestyle='--', color='black')
+    plt.xlim([0, XMAX])
+    plt.ylim([0, 0.1])
+    plt.xlabel(r'Average RMS Field Aberration $\mu(\Psi)$ [rad]')
+    plt.ylabel(r'RMS NCPA $\mu(\Phi)$ [rad]')
+    plt.legend()
+    plt.show()
+
+
+    # do not plot the phase that many times
+    # fix the missing Zernike when you load
 
 
     # fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
