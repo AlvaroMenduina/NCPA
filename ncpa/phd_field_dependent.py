@@ -34,6 +34,7 @@ Date: August 2020
 
 import os
 import numpy as np
+from numpy.linalg import norm
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from time import time
@@ -117,6 +118,27 @@ class ZernikePhase(object):
             zern_coef[h_index] = (-1) ** sign_k * zemax_coeff[i]
 
         return zern_coef
+
+    def calculate_rms_wfe(self, zemax_coeff):
+        """
+        Calculate the RMS WFE for a set of Zemax Zernike coefficients
+        At the same time, we transform the coefficients into the H_matrix format
+
+        :param zemax_coeff: an array of shape [N_PSF, N_zernike]
+        :return:
+        """
+
+        N_PSF = zemax_coeff.shape[0]
+        new_coef, rms = [], []
+        for k in range(N_PSF):
+            coef = self.transform_zemax_coefficients(zemax_coeff[k])
+            new_coef.append(coef)
+            phase = np.dot(self.H_matrix, coef)
+            rms.append(np.std(phase[self.pupil_mask]))
+        new_coef = np.array(new_coef)
+        rms = np.array(rms)
+
+        return new_coef, rms
 
     def show_field_phase(self, zemax_coef, plot=False):
         """
@@ -555,7 +577,7 @@ class POPAnalysis(object):
 
         return pop_psf, pop_psf_foc, mean_rms_field
 
-    def generate_dataset(self, N_PSF, wave_idx, defocus_pv, N_slices, N_zernike_field, z_field_max):
+    def generate_dataset(self, N_PSF, wave_idx, defocus_pv, N_slices, N_zernike_field, z_field_max, z_zern):
 
         if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
             raise FileExistsError("%s does NOT exist" % zemax_file)
@@ -566,8 +588,7 @@ class POPAnalysis(object):
         # Get some info on the system
         system = self.zosapi.TheSystem  # The Optical System
 
-        z = 0.10
-        zern_coef = np.random.uniform(low=-z, high=z, size=(N_PSF, 5))
+        zern_coef = np.random.uniform(low=-z_zern, high=z_zern, size=(N_PSF, 5))
         PSF_array = np.zeros((N_PSF, self.N_pix//2, self.N_pix//2, 2))
         mean_field_rms = []
         for k in range(N_PSF):
@@ -693,37 +714,44 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
 
     # We create a dataset of PSF images with NCPA but WITHOUT Field-Dependent aberrations
-    N_train, N_test = 9, 1
+    N_train, N_test = 900, 100
     N_PSF = N_train + N_test
+    z_zern = 0.12       # the strength of the NCPA aberrations
+    start = time()
     PSF, zern_coef, _m = pop_analysis.generate_dataset(N_PSF=N_PSF, wave_idx=wave_idx, defocus_pv=defocus_pv,
-                                                       N_slices=N_slices, N_zernike_field=0, z_field_max=None)
+                                                       N_slices=N_slices, N_zernike_field=0, z_field_max=None,
+                                                       z_zern=z_zern)
+    speed = time() - start
+    print("Time creating %d PSF images: %.2f sec | %.2f sec / PSF" % (N_PSF, speed, speed / N_PSF))
 
+    np.save(os.path.join(zemax_path, 'PSF'), PSF)
+    np.save(os.path.join(zemax_path, 'zern_coef'), zern_coef)
 
-    # np.save(os.path.join(zemax_path, 'PSF'), PSF)
-    # np.save(os.path.join(zemax_path, 'zern_coef'), zern_coef)
-
-    # PSF = np.load(os.path.join(zemax_path, 'PSF.npy'))
-    # zern_coef = np.load(os.path.join(zemax_path, 'zern_coef.npy'))
+    PSF = np.load(os.path.join(zemax_path, 'PSF.npy'))
+    zern_coef = np.load(os.path.join(zemax_path, 'zern_coef.npy'))
 
     peaks_nom = np.max(PSF[:, :, :, 0], axis=(1, 2))
     peaks_foc = np.max(PSF[:, :, :, 1], axis=(1, 2))
     plt.figure()
     plt.scatter(np.arange(N_PSF), peaks_nom)
     plt.scatter(np.arange(N_PSF), peaks_foc)
-    plt.ylim([0, 1])
+    # plt.ylim([0, 1])
     plt.show()
 
-    train_PSF, test_PSF = PSF[:900], PSF[900:]
-    train_coef, test_coef = zern_coef[:900], zern_coef[900:]
+    train_PSF, test_PSF = PSF[:N_train], PSF[N_train:]
+    train_coef, test_coef = zern_coef[:N_train], zern_coef[N_train:]
 
-    layer_filers = [64, 32, 8, 8]  # How many filters per layer
+    # We train a Machine Learning model to predict the NCPA Zernike Coefficients
+    # we use the PSF images with random NCPA but no field-dependent aberrations as training examples
+
+    layer_filters = [64, 32, 8, 8]  # How many filters per layer
     pix = PSF.shape[1]
     kernel_size = 3
     input_shape = (pix, pix, 2,)
     epochs = 50
 
     # Initialize Convolutional Neural Network model for calibration
-    calibration_model = calibration.create_cnn_model(layer_filers, kernel_size, input_shape,
+    calibration_model = calibration.create_cnn_model(layer_filters, kernel_size, input_shape,
                                                      N_classes=5, name='CALIBR', activation='relu')
 
     # Train the calibration model
@@ -731,87 +759,101 @@ if __name__ == """__main__""":
                                           validation_data=(test_PSF, test_coef),
                                           epochs=epochs, batch_size=32, shuffle=True, verbose=1)
 
-    from numpy.linalg import norm
-    # Evaluate performance
-    guess_coef = calibration_model.predict(test_PSF)
-    residual_coef = test_coef - guess_coef
-    norm_before = np.mean(norm(test_coef, axis=1))
-    norm_after = np.mean(norm(residual_coef, axis=1))
-    print("\nPerformance:")
-    print("Average Norm Coefficients")
-    print("Before: %.4f" % norm_before)
-    print("After : %.4f" % norm_after)
+    def evaluate_performance(model, PSF_images, coef_before):
+        """
 
-    def calculate_rms_wfe(zemax_coef):
+        :param model:
+        :param PSF_images:
+        :param coef_before:
+        :return:
+        """
 
-        N_PSF = zemax_coef.shape[0]
-        new_coef, rms = [], []
-        for k in range(N_PSF):
-            coef = pop_analysis.zernike.transform_zemax_coefficients(zemax_coef[k])
-            new_coef.append(coef)
-            phase = np.dot(pop_analysis.zernike.H_matrix, coef)
-            rms.append(np.std(phase[pop_analysis.zernike.pupil_mask]))
-        new_coef = np.array(new_coef)
-        rms = np.array(rms)
+        # Evaluate performance
+        guess_coef = model.predict(PSF_images)
+        residual_coef = coef_before - guess_coef
+        norm_before = np.mean(norm(coef_before, axis=1))
+        norm_after = np.mean(norm(residual_coef, axis=1))
+        print("\nPerformance:")
+        print("Average Norm Coefficients")
+        print("Before: %.4f" % norm_before)
+        print("After : %.4f" % norm_after)
 
-        return new_coef, rms
+        return residual_coef
 
-    nc, rms_before = calculate_rms_wfe(test_coef)
-    ncc, rms_after = calculate_rms_wfe(residual_coef)
+    residual_coef = evaluate_performance(model=calibration_model, PSF_images=test_PSF, coef_before=test_coef)
 
-    # Field aberrations
-    PSF_field, zern_coef_field, mean_field_rms = pop_analysis.generate_dataset(N_PSF=100, N_zernike=N_zernike, N_slices=9,
-                                                               z_max=0.01, wave_idx=wave_idx, defocus_pv=defocus_pv)
+    nc, rms_before = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=test_coef)
+    ncc, rms_after = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef)
 
-    guess_coef_field = calibration_model.predict(PSF_field)
-    residual_coef_field = zern_coef_field - guess_coef_field
-    norm_before_field = np.mean(norm(zern_coef_field, axis=1))
-    norm_after_field = np.mean(norm(residual_coef_field, axis=1))
-    print("\nPerformance:")
-    print("Average Norm Coefficients")
-    print("Before: %.4f" % norm_before_field)
-    print("After : %.4f" % norm_after_field)
+    print("\nNominal Calibration Model Performance")
+    print("RMS WFE Before Calibration: %.4f +- %.4f rad" % (np.mean(rms_before), np.std(rms_before)))
+    print("RMS WFE After Calibration: %.4f +- %.4f rad" % (np.mean(rms_after), np.std(rms_after)))
 
-    nc, rms_before_field = calculate_rms_wfe(zern_coef_field)
-    ncc, rms_after_field = calculate_rms_wfe(residual_coef_field)
+    # ================================================================================================================ #
+    #    Impact of Field Dependent Aberrations on the performance of the Machine Learning model
+    # ================================================================================================================ #
 
-    fig, (ax1, ax2) = plt.subplots(1, 2)
+    # We crete a set of PSF images with the same NCPA characteristics, plus some Field Dependent Aberrations
+    z_field_max = 0.01
+    PSF_field, zern_coef_field, mean_field_rms = pop_analysis.generate_dataset(N_PSF=N_test, wave_idx=wave_idx, defocus_pv=defocus_pv,
+                                                                               N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                                               z_field_max=z_field_max, z_zern=z_zern)
 
-    ax1.scatter(np.arange(100), rms_before, s=5)
-    ax1.scatter(np.arange(100), rms_after, s=5)
+    residual_coef_field = evaluate_performance(model=calibration_model, PSF_images=PSF_field, coef_before=zern_coef_field)
+
+    ncf, rms_before_field = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=zern_coef_field)
+    nccf, rms_after_field = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef_field)
+
+    # We compare the Before/After performance for the Nominal case (NO Field Dependent Aberr.) and the case with Aberrations
+
+    s = 10
+    nbins = 10
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+
+    ax1.scatter(np.arange(N_test), rms_before, s=s)
+    ax1.scatter(np.arange(N_test), rms_after, color='lightgreen', s=s)
     ax1.set_ylim([0, 0.10])
-    ax1.set_xlabel(r'Sample')
+    ax1.set_xlabel(r'Test PSF Sample')
+    ax1.set_ylabel(r'RMS WFE [rad]')
     ax1.set_title(r'No Field Aberrations')
 
-    ax2.scatter(np.arange(100), rms_before_field, s=5)
-    ax2.scatter(np.arange(100), rms_after_field, s=5)
+    ax2.scatter(np.arange(N_test), rms_before_field, s=s)
+    ax2.scatter(np.arange(N_test), rms_after_field, color='coral', s=s)
+    ax2.set_xlabel(r'Test PSF Sample')
+    # ax2.set_ylabel(r'RMS WFE [rad]')
+    ax2.set_title(r'Field Aberrations | RMS($\Psi$)=%.3f rad' % np.mean(mean_field_rms))
     ax2.set_ylim([0, 0.10])
-    # ax2.set_title(r'Field Aberrations | RMS($\psi$)=%.3f rad' % (np.mean(mean_field_rms)))
+
+    ax3.hist(rms_after, bins=nbins, histtype='step', color='lightgreen')
+    ax3.hist(rms_after_field, bins=nbins, histtype='step', color='coral')
+    ax3.set_xlim([0, 0.025])
+    ax3.set_xlabel(r'RMS WFE [rad]')
+
     plt.show()
 
     # rr = [0.001, 0.005, 0.01, 0.015, 0.020, 0.025]
     N = 100
-    rr = np.linspace(0.001, 0.05, N)
+    rr = np.linspace(0.001, 0.075, N)
     RMS_field_aber = []
     RMS_before, RMS_after = [], []
     for z in rr:
 
-        PSF_field, zern_coef_field, mean_field_rms = pop_analysis.generate_dataset(N_PSF=5, N_zernike=N_zernike,
-                                                                                   N_slices=9,
-                                                                                   z_max=z, wave_idx=wave_idx,
-                                                                                   defocus_pv=defocus_pv)
+        PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=5, wave_idx=wave_idx, defocus_pv=defocus_pv,
+                                                                       N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                                       z_field_max=z, z_zern=z_zern)
 
         # The mean of the RMS for the Field Aberrations in the dataset
-        RMS_field_aber.extend(mean_field_rms)
+        RMS_field_aber.extend(mean_f_rms)
 
-        guess_coef_field = calibration_model.predict(PSF_field)
-        residual_coef_field = zern_coef_field - guess_coef_field
+        residual_coef_f = evaluate_performance(model=calibration_model, PSF_images=PSF_f,
+                                                   coef_before=zern_coef_f)
 
-        nc, rms_before = calculate_rms_wfe(zern_coef_field)
-        ncc, rms_after = calculate_rms_wfe(residual_coef_field)
+        ncf, rms_before_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=zern_coef_f)
+        nccf, rms_after_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef_f)
 
-        RMS_before.extend(rms_before)
-        RMS_after.extend(rms_after)
+
+        RMS_before.extend(rms_before_f)
+        RMS_after.extend(rms_after_f)
 
     XMAX = np.max(RMS_field_aber)
     x = np.linspace(0, XMAX, 10)
@@ -821,12 +863,58 @@ if __name__ == """__main__""":
     plt.scatter(RMS_field_aber, RMS_before, s=10, label='Before')
     plt.scatter(RMS_field_aber, RMS_after, s=10, label='After')
     plt.plot(x, x, linestyle='--', color='black')
+    plt.axhline(y=np.mean(rms_after))
     plt.xlim([0, XMAX])
     plt.ylim([0, 0.1])
     plt.xlabel(r'Average RMS Field Aberration $\mu(\Psi)$ [rad]')
     plt.ylabel(r'RMS NCPA $\mu(\Phi)$ [rad]')
     plt.legend()
     plt.show()
+
+    import seaborn as sns
+
+    MEAN_BEFORE = np.mean(RMS_before)
+    STD_BEFORE = np.std(RMS_before)
+
+    fig, ax = plt.subplots(1, 1, dpi=100)
+    sns.kdeplot(RMS_field_aber, RMS_after, shade=True, ax=ax)
+    ax.axhline(y=MEAN_BEFORE, color='red')
+    ax.axhline(y=MEAN_BEFORE + 2*STD_BEFORE, linestyle='--', color='red')
+    ax.axhline(y=MEAN_BEFORE - 2*STD_BEFORE, linestyle='--', color='red')
+    ax.fill_between(y1=MEAN_BEFORE - 2*STD_BEFORE, y2=MEAN_BEFORE + 2*STD_BEFORE, x=[0, 1], alpha=0.5,
+                    facecolor='coral', label=r'$\mu_0(\Phi) \pm 2\sigma$')
+    # ax.scatter(RMS_field_aber, RMS_before, s=10, label='Before', color='red')
+    ax.plot(x, x, linestyle='--', color='navy')
+    ax.scatter(RMS_field_aber, RMS_after, s=5, color='navy')
+    ax.set_xlim([0, XMAX])
+    ax.set_ylim([0, 0.1])
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'Average RMS Field Aberration $\mu(\Psi)$ [rad]')
+    ax.set_ylabel(r'RMS NCPA $\Phi$ [rad]')
+    ax.legend()
+
+    plt.show()
+
+    # Train a ML model using examples with FDA
+    PSF_robust, coef_robust = [], []
+    for z in rr:
+        PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=10, wave_idx=wave_idx, defocus_pv=defocus_pv,
+                                                                       N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                                       z_field_max=z, z_zern=z_zern)
+        PSF_robust.append(PSF_f)
+        coef_robust.append(zern_coef_f)
+
+    PSF_robust_c = np.concatenate(PSF_robust)
+    coef_robust_c = np.concatenate(coef_robust)
+
+    # Initialize Convolutional Neural Network model for calibration
+    robust_model = calibration.create_cnn_model(layer_filters, kernel_size, input_shape,
+                                                     N_classes=5, name='ROBUST', activation='relu')
+
+    # Train the calibration model
+    train_history = robust_model.fit(x=PSF_robust_c, y=coef_robust_c,
+                                     validation_data=(PSF_robust_c[N_train:], coef_robust_c[N_train:]),
+                                     epochs=epochs, batch_size=32, shuffle=True, verbose=1)
 
 
     # do not plot the phase that many times
