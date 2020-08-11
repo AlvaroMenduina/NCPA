@@ -805,7 +805,7 @@ if __name__ == """__main__""":
     nccf, rms_after_field = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef_field)
 
     # We compare the Before/After performance for the Nominal case (NO Field Dependent Aberr.) and the case with Aberrations
-
+    # We observe that the RMS WFE after calibration is higher when we field dependent aberrations
     s = 10
     nbins = 10
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
@@ -831,13 +831,15 @@ if __name__ == """__main__""":
 
     plt.show()
 
-    # rr = [0.001, 0.005, 0.01, 0.015, 0.020, 0.025]
+    # But how does the FDA impact the performance?
+    # Here we introduce increasingly higher RMS WFE of aberrations to see how the performance changes
     N = 100
-    rr = np.linspace(0.001, 0.075, N)
-    RMS_field_aber = []
-    RMS_before, RMS_after = [], []
+    rr = np.linspace(0.001, 0.075, N)       # strength of the field-dependent aberrations coefficients
+    RMS_field_aber = []                     # The RMS of the FDA (averaged across slices)
+    RMS_before, RMS_after = [], []          # RMS WFE of NCPA before and after calibration
     for z in rr:
 
+        # For each case of FDA strength we create 5 random PSFs
         PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=5, wave_idx=wave_idx, defocus_pv=defocus_pv,
                                                                        N_slices=N_slices, N_zernike_field=N_zernike_field,
                                                                        z_field_max=z, z_zern=z_zern)
@@ -845,16 +847,18 @@ if __name__ == """__main__""":
         # The mean of the RMS for the Field Aberrations in the dataset
         RMS_field_aber.extend(mean_f_rms)
 
+        # We evaluate the performance
         residual_coef_f = evaluate_performance(model=calibration_model, PSF_images=PSF_f,
                                                    coef_before=zern_coef_f)
 
         ncf, rms_before_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=zern_coef_f)
         nccf, rms_after_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef_f)
 
-
         RMS_before.extend(rms_before_f)
         RMS_after.extend(rms_after_f)
 
+    # Here we plot the RMS WFE after calibration versus the RMS WFE of Field-Dependent Aberrations that we introduced
+    # to see if the final RMS gets worse as we add more FDA. On top of that we
     XMAX = np.max(RMS_field_aber)
     x = np.linspace(0, XMAX, 10)
 
@@ -895,10 +899,15 @@ if __name__ == """__main__""":
 
     plt.show()
 
+    # ================================================================================================================ #
+    #    Robust Training: could we train the ML model
+    # ================================================================================================================ #
+
     # Train a ML model using examples with FDA
     PSF_robust, coef_robust = [], []
-    for z in rr:
-        PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=10, wave_idx=wave_idx, defocus_pv=defocus_pv,
+    for k_z, z in enumerate(rr):
+        print("#%d/%d" % (k_z, N))
+        PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=25, wave_idx=wave_idx, defocus_pv=defocus_pv,
                                                                        N_slices=N_slices, N_zernike_field=N_zernike_field,
                                                                        z_field_max=z, z_zern=z_zern)
         PSF_robust.append(PSF_f)
@@ -913,8 +922,64 @@ if __name__ == """__main__""":
 
     # Train the calibration model
     train_history = robust_model.fit(x=PSF_robust_c, y=coef_robust_c,
-                                     validation_data=(PSF_robust_c[N_train:], coef_robust_c[N_train:]),
+                                     validation_data=(PSF_robust_c[::100], coef_robust_c[::100]),
                                      epochs=epochs, batch_size=32, shuffle=True, verbose=1)
+
+    # Now we repeat the previous analysis of
+    RMS_field_aber_rob = []                     # The RMS of the FDA (averaged across slices)
+    RMS_before_rob, RMS_after_rob = [], []          # RMS WFE of NCPA before and after calibration
+    before_rob, guess_rob, residual_rob = [], [], []
+    for z in rr:
+
+        # For each case of FDA strength we create 5 random PSFs
+        PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=5, wave_idx=wave_idx, defocus_pv=defocus_pv,
+                                                                       N_slices=N_slices, N_zernike_field=N_zernike_field,
+                                                                       z_field_max=z, z_zern=z_zern)
+
+        # The mean of the RMS for the Field Aberrations in the dataset
+        RMS_field_aber_rob.extend(mean_f_rms)
+
+        # We evaluate the performance
+        residual_coef_f = evaluate_performance(model=robust_model, PSF_images=PSF_f, coef_before=zern_coef_f)
+
+        ncf, rms_before_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=zern_coef_f)
+        nccf, rms_after_f = pop_analysis.zernike.calculate_rms_wfe(zemax_coeff=residual_coef_f)
+
+        RMS_before_rob.extend(rms_before_f)
+        RMS_after_rob.extend(rms_after_f)
+
+        # TODO: Calculate the average Norm of the the guess coefficients.
+        # Does the norm of the guess coef change as we increase FDA?
+        # If it does decay it suggests the model doesn't know what to predict
+        # If it stays the same, it suggests the predictions are simply getting worse. Mistaking the features?
+        guessed = zern_coef_f - residual_coef_f
+        before_rob.append(zern_coef_f)
+        guess_rob.append(guessed)
+        residual_rob.append(residual_coef_f)
+
+    fig, ax = plt.subplots(1, 1, dpi=100)
+    sns.kdeplot(RMS_field_aber, RMS_after, shade=True, ax=ax)
+    ax.axhline(y=MEAN_BEFORE, color='red')
+    ax.axhline(y=MEAN_BEFORE + 2*STD_BEFORE, linestyle='--', color='red')
+    ax.axhline(y=MEAN_BEFORE - 2*STD_BEFORE, linestyle='--', color='red')
+    ax.fill_between(y1=MEAN_BEFORE - 2*STD_BEFORE, y2=MEAN_BEFORE + 2*STD_BEFORE, x=[0, 1], alpha=0.5,
+                    facecolor='coral', label=r'$\mu_0(\Phi) \pm 2\sigma$')
+    # ax.scatter(RMS_field_aber, RMS_before, s=10, label='Before', color='red')
+    ax.plot(x, x, linestyle='--', color='navy')
+    ax.scatter(RMS_field_aber_rob, RMS_after_rob, s=5, color='black', marker='^', label='Robust')
+    ax.set_xlim([0, XMAX])
+    ax.set_ylim([0, 0.1])
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'Average RMS Field Aberration $\mu(\Psi)$ [rad]')
+    ax.set_ylabel(r'RMS NCPA $\Phi$ [rad]')
+    ax.legend(loc=2)
+
+    plt.show()
+
+    # TODO: what is the distribution of residual coefficients?
+    # Are some aberrations easier to predict in the presence of FDA?
+
+    # Ideally, we would like to look at correlations between FDA coefficients and residual NCPA
 
 
     # do not plot the phase that many times
