@@ -291,7 +291,7 @@ class POPAnalysis(object):
                               '+7': 49, '+8': 27, '+9': 47, '+10': 29, '+11': 45, '+12': 31,
                               '+13': 43, '+14': 33, '+15': 41}
 
-    def set_field_aberrations(self, system, N_zernike, N_slices, z_max, plot=False):
+    def set_field_aberrations(self, system, N_zernike, N_slices, z_max, fda_coef=None, plot=False):
         """
         Using the Multi-Configuration Editor, we add field-dependent aberrations
         at the Pupil Mirror, by changing the Zernike coefficients for each slice (configuration)
@@ -300,6 +300,7 @@ class POPAnalysis(object):
         :param N_zernike: how many Zernike polynomials (from defocus onwards)
         :param N_slices: how many slices are we using to run POP
         :param z_max: intensity of the Zernike coefficients, in radians
+        :param fda_coef: if provided, we will use those coefficients
         :param plot: whether to plot the wavefronts for the field-dependent aberrations
         :return:
         """
@@ -317,8 +318,9 @@ class POPAnalysis(object):
         config_keys = ['-%d' % (i + 1) for i in range(delta)] + ['Central'] + ['+%d' % (i + 1) for i in range(delta)]
         configs = [pop_analysis.config_slices[key] for key in config_keys]
 
-        # Create a set of random Zernike polynomials for each slice
-        zern_coef = np.random.uniform(low=-z_max, high=z_max, size=(N_slices, N_zernike))
+        if fda_coef is None:
+            # Create a set of random Zernike polynomials for each slice
+            fda_coef = np.random.uniform(low=-z_max, high=z_max, size=(N_slices, N_zernike))
 
         # Check how many Operands we have in the MCE already
         # Nops = MCE.NumberOfOperands
@@ -336,7 +338,7 @@ class POPAnalysis(object):
             # Set the values of the Zernike coefficients for each slice
             for j, config in enumerate(configs):
                 # This is where we make the aberrations field-dependent by giving one value to each slice
-                zernike_op.GetOperandCell(config).DoubleValue = zern_coef[j, k]
+                zernike_op.GetOperandCell(config).DoubleValue = fda_coef[j, k]
 
         # for k in range(N_zernike):
         #     op = MCE.GetOperandAt(Nops + k + 1)
@@ -347,7 +349,7 @@ class POPAnalysis(object):
         # for j, config in enumerate(configs):
 
         # Get the average value of the RMS of the field-dependent aberrations
-        mean_rms_field = self.zernike.show_field_phase(zern_coef, plot=plot)
+        mean_rms_field = self.zernike.show_field_phase(fda_coef, plot=plot)
 
         return mean_rms_field
 
@@ -514,7 +516,7 @@ class POPAnalysis(object):
         return
 
     def calculate_pop_psf(self, opt_system=None, wave_idx=1, zern_coef=None, defocus_pv=None, N_slices=9,
-                          N_zernike_field=12, z_field_max=None, plot_field=False):
+                          N_zernike_field=12, z_field_max=None, fda_coef=None, plot_field=False):
 
         if opt_system is None:
             # check that the file name is correct and the zemax file exists
@@ -535,7 +537,7 @@ class POPAnalysis(object):
         else:
             print("Adding Field Dependent Aberrations")
             mean_rms_field = self.set_field_aberrations(system=system, N_zernike=N_zernike_field, N_slices=N_slices,
-                                                        z_max=z_field_max, plot=plot_field)
+                                                        z_max=z_field_max, fda_coef=fda_coef, plot=plot_field)
 
         # Add NCPA aberrations at the entrace pupil
         if zern_coef is not None:
@@ -577,7 +579,8 @@ class POPAnalysis(object):
 
         return pop_psf, pop_psf_foc, mean_rms_field
 
-    def generate_dataset(self, N_PSF, wave_idx, defocus_pv, N_slices, N_zernike_field, z_field_max, z_zern):
+    def generate_dataset(self, N_PSF, wave_idx, defocus_pv, N_slices, N_zernike_field, z_field_max, z_zern,
+                         zern_coef=None, fda_coefs=None):
 
         if os.path.exists(os.path.join(zemax_path, zemax_file)) is False:
             raise FileExistsError("%s does NOT exist" % zemax_file)
@@ -588,16 +591,18 @@ class POPAnalysis(object):
         # Get some info on the system
         system = self.zosapi.TheSystem  # The Optical System
 
-        zern_coef = np.random.uniform(low=-z_zern, high=z_zern, size=(N_PSF, 5))
+        if zern_coef is None:
+            zern_coef = np.random.uniform(low=-z_zern, high=z_zern, size=(N_PSF, 5))
         PSF_array = np.zeros((N_PSF, self.N_pix//2, self.N_pix//2, 2))
         mean_field_rms = []
         for k in range(N_PSF):
             if k % 50 == 0:
                 print("PSF #%d / %d" % (k + 1, N_PSF))
             coef = zern_coef[k]
+            fda_coef = None if fda_coefs is None else fda_coefs[k]
             psf_nom, psf_foc, _rms = self.calculate_pop_psf(opt_system=system, wave_idx=wave_idx, zern_coef=coef, defocus_pv=defocus_pv,
                                                             N_slices=N_slices, N_zernike_field=N_zernike_field,
-                                                            z_field_max=z_field_max, plot_field=False)
+                                                            z_field_max=z_field_max, fda_coef=fda_coef, plot_field=False)
             PSF_array[k, :, :, 0] = psf_nom
             PSF_array[k, :, :, 1] = psf_foc
             mean_field_rms.append(_rms)
@@ -837,7 +842,9 @@ if __name__ == """__main__""":
     rr = np.linspace(0.001, 0.075, N)       # strength of the field-dependent aberrations coefficients
     RMS_field_aber = []                     # The RMS of the FDA (averaged across slices)
     RMS_before, RMS_after = [], []          # RMS WFE of NCPA before and after calibration
-    for z in rr:
+    before_naive, guess_naive, residual_naive = [], [], []
+    for k_z, z in enumerate(rr):
+        print("#%d/%d" % (k_z, N))
 
         # For each case of FDA strength we create 5 random PSFs
         PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=5, wave_idx=wave_idx, defocus_pv=defocus_pv,
@@ -856,6 +863,99 @@ if __name__ == """__main__""":
 
         RMS_before.extend(rms_before_f)
         RMS_after.extend(rms_after_f)
+
+        guessed = zern_coef_f - residual_coef_f
+        before_naive.append(zern_coef_f)
+        guess_naive.append(guessed)
+        residual_naive.append(residual_coef_f)
+
+    guesses_naive = np.concatenate(guess_naive)
+    befores_naive = np.concatenate(before_naive)
+    reds = np.array(RMS_field_aber)
+    reds = reds - np.min(reds)
+    red_idx = reds / np.max(reds)
+    import matplotlib.cm as cm
+    colors = cm.Reds(red_idx)[::-1]
+
+    fig, axes = plt.subplots(3, 2, figsize=(5, 7))
+    data_xx = [norm(befores_naive, axis=1)] + [befores_naive[:, k] for k in range(5)]
+    data_yy = [norm(guesses_naive, axis=1)] + [guesses_naive[:, k] for k in range(5)]
+    data_labels = ['Norm', 'Defocus', '(+) Astigmatism', r'($\times$) Astigmatism', 'Horiz. Coma', 'Vert. Coma']
+    for k in range(6):
+        # x_data = befores_naive[:, k]
+        # y_data = guesses_naive[:, k]
+        x_data = data_xx[k][::-1]
+        y_data = data_yy[k][::-1]
+        x_lim = max(np.max(x_data), -np.min(x_data))
+        y_lim = max(np.max(y_data), -np.min(y_data))
+        lim = 0.40 if k == 0 else 0.30
+        x0 = np.linspace(-1.1*lim, 1.1*lim, 10)
+
+        ax = axes.flatten()[k]
+        ax.scatter(x_data, y_data, facecolor=colors, s=7)
+        ax.plot(x0, x0, linestyle='--', color='black')
+        if k == 0:
+            ax.set_xlim([0, 1.1*lim])
+            ax.set_ylim([0, 1.1*lim])
+        else:
+            ax.set_xlim([-1.1*lim, 1.1*lim])
+            ax.set_ylim([-1.1*lim, 1.1*lim])
+
+        ax.set_xlabel(r'Truth [rad]')
+        ax.set_ylabel(r'Prediction [rad]')
+        ax.set_aspect('equal')
+        ax.set_title(data_labels[k])
+        ax.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+    N_bins = 5
+    n_per_bin = befores_naive.shape[0] // N_bins
+    mu_before, std_before = [], []
+    mu_guess, std_guess = [], []
+    for k in range(N_bins):
+        data_before = norm(befores_naive[k*n_per_bin:(k+1)*n_per_bin], axis=1)
+        data_guess = norm(guesses_naive[k*n_per_bin:(k+1)*n_per_bin], axis=1)
+        mu_before.append(np.mean(data_before))
+        mu_guess.append(np.mean(data_guess))
+        std_before.append(np.std(data_before))
+        std_guess.append(np.std(data_guess))
+
+    MU = np.mean(mu_before)
+    fig, ax = plt.subplots(1, 1)
+    ax.fill_between(x=np.arange(1, N_bins+1), y1=np.array(mu_guess) - np.array(std_guess),
+                    y2=np.array(mu_guess) + np.array(std_guess), alpha=0.5, facecolor='coral')
+    ax.plot(np.arange(1, N_bins+1), mu_guess, color='orange')
+    ax.fill_between(x=np.arange(1, N_bins+1), y1=np.array(mu_before) - np.array(std_before) - MU/2,
+                    y2=np.array(mu_before) + np.array(std_before) - MU/2, alpha=0.5, facecolor='lightblue')
+    ax.plot(np.arange(1, N_bins + 1), mu_before - MU/2, color='navy')
+    plt.show()
+
+    plt.figure()
+    plt.plot(norm(guesses_naive, axis=1))
+    plt.plot(norm(befores_naive, axis=1))
+    plt.show()
+
+    fig, ax = plt.subplots(1, 1)
+    ax.scatter(norm(befores_naive, axis=1), norm(guesses_naive, axis=1), facecolor=colors, s=5)
+    ax.set_aspect('equal')
+    plt.show()
+
+    plt.figure()
+    plt.scatter(RMS_field_aber, norm(g, axis=1), s=5)
+    plt.show()
+
+    plt.figure()
+    plt.scatter(np.arange(500), norm(z_c, axis=1))
+    plt.scatter(np.arange(500), norm(g, axis=1))
+    plt.show()
+
+
+
+    plt.figure()
+    plt.scatter(norm(z_c, axis=1), norm(g, axis=1), s=5, facecolor=colors)
+    plt.show()
 
     # Here we plot the RMS WFE after calibration versus the RMS WFE of Field-Dependent Aberrations that we introduced
     # to see if the final RMS gets worse as we add more FDA. On top of that we
@@ -916,6 +1016,12 @@ if __name__ == """__main__""":
     PSF_robust_c = np.concatenate(PSF_robust)
     coef_robust_c = np.concatenate(coef_robust)
 
+    np.save(os.path.join(zemax_path, 'PSF_robust'), PSF_robust_c)
+    np.save(os.path.join(zemax_path, 'zern_coef_robust'), coef_robust_c)
+
+    PSF_robust_c = np.load(os.path.join(zemax_path, 'PSF_robust.npy'))
+    coef_robust_c = np.load(os.path.join(zemax_path, 'zern_coef_robust.npy'))
+
     # Initialize Convolutional Neural Network model for calibration
     robust_model = calibration.create_cnn_model(layer_filters, kernel_size, input_shape,
                                                      N_classes=5, name='ROBUST', activation='relu')
@@ -925,11 +1031,17 @@ if __name__ == """__main__""":
                                      validation_data=(PSF_robust_c[::100], coef_robust_c[::100]),
                                      epochs=epochs, batch_size=32, shuffle=True, verbose=1)
 
+    plt.figure()
+    plt.plot(train_history.history['loss'])
+    plt.plot(train_history.history['val_loss'])
+    plt.show()
+
     # Now we repeat the previous analysis of
     RMS_field_aber_rob = []                     # The RMS of the FDA (averaged across slices)
     RMS_before_rob, RMS_after_rob = [], []          # RMS WFE of NCPA before and after calibration
     before_rob, guess_rob, residual_rob = [], [], []
-    for z in rr:
+    for k_z, z in enumerate(rr):
+        print("#%d/%d" % (k_z, N))
 
         # For each case of FDA strength we create 5 random PSFs
         PSF_f, zern_coef_f, mean_f_rms = pop_analysis.generate_dataset(N_PSF=5, wave_idx=wave_idx, defocus_pv=defocus_pv,
@@ -981,9 +1093,10 @@ if __name__ == """__main__""":
 
     # Ideally, we would like to look at correlations between FDA coefficients and residual NCPA
 
+    # Can we run several iterations?
 
-    # do not plot the phase that many times
-    # fix the missing Zernike when you load
+
+
 
 
     # fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
@@ -1010,27 +1123,3 @@ if __name__ == """__main__""":
     # plt.show()
 
     #
-
-    # from scipy.stats import reciprocal
-    # a = 1e-5
-    # b = 1e-1
-    # r = reciprocal.rvs(a, b, size=500)
-    #
-    # rms, mean_diff = [], []
-    # for z in r:
-    #     psf_field, mean_rms = pop_analysis.calculate_pop_psf(N_zernike, N_slices, z_max=z, wave_idx=1,
-    #                                                          defocus_pv=None)
-    #     psf_field /= pop_peak
-    #     diff = psf_field - psf
-    #
-    #     rms.append(mean_rms)
-    #     mean_diff.append(np.mean(np.abs(diff)))
-    #     plt.close('all')
-    #
-    # plt.figure()
-    # plt.scatter(rms, mean_diff, s=2)
-    # # plt.xscale('log')
-    # plt.show()
-
-
-
