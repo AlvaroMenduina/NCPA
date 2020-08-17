@@ -877,7 +877,7 @@ if __name__ == """__main__""":
     import matplotlib.cm as cm
     colors = cm.Reds(red_idx)[::-1]
 
-    fig, axes = plt.subplots(3, 2, figsize=(5, 7))
+    fig, axes = plt.subplots(3, 2, figsize=(7, 10))
     data_xx = [norm(befores_naive, axis=1)] + [befores_naive[:, k] for k in range(5)]
     data_yy = [norm(guesses_naive, axis=1)] + [guesses_naive[:, k] for k in range(5)]
     data_labels = ['Norm', 'Defocus', '(+) Astigmatism', r'($\times$) Astigmatism', 'Horiz. Coma', 'Vert. Coma']
@@ -890,6 +890,9 @@ if __name__ == """__main__""":
         y_lim = max(np.max(y_data), -np.min(y_data))
         lim = 0.40 if k == 0 else 0.30
         x0 = np.linspace(-1.1*lim, 1.1*lim, 10)
+
+        dev = y_data - x_data
+        spread = np.std(dev)
 
         ax = axes.flatten()[k]
         ax.scatter(x_data, y_data, facecolor=colors, s=7)
@@ -904,7 +907,7 @@ if __name__ == """__main__""":
         ax.set_xlabel(r'Truth [rad]')
         ax.set_ylabel(r'Prediction [rad]')
         ax.set_aspect('equal')
-        ax.set_title(data_labels[k])
+        ax.set_title(data_labels[k] + r' $\sigma$=%.3f rad' % spread)
         ax.grid(True)
     plt.tight_layout()
     plt.show()
@@ -1068,6 +1071,49 @@ if __name__ == """__main__""":
         before_rob.append(zern_coef_f)
         guess_rob.append(guessed)
         residual_rob.append(residual_coef_f)
+
+    guesses_rob = np.concatenate(guess_rob)
+    befores_rob = np.concatenate(before_rob)
+    reds = np.array(RMS_field_aber)
+    reds = reds - np.min(reds)
+    red_idx = reds / np.max(reds)
+    import matplotlib.cm as cm
+    colors = cm.Blues(red_idx)[::-1]
+
+    fig, axes = plt.subplots(3, 2, figsize=(7, 10))
+    data_xx = [norm(befores_rob, axis=1)] + [befores_rob[:, k] for k in range(5)]
+    data_yy = [norm(guesses_rob, axis=1)] + [guesses_rob[:, k] for k in range(5)]
+    data_labels = ['Norm', 'Defocus', '(+) Astigmatism', r'($\times$) Astigmatism', 'Horiz. Coma', 'Vert. Coma']
+    for k in range(6):
+        # x_data = befores_naive[:, k]
+        # y_data = guesses_naive[:, k]
+        x_data = data_xx[k][::-1]
+        y_data = data_yy[k][::-1]
+        x_lim = max(np.max(x_data), -np.min(x_data))
+        y_lim = max(np.max(y_data), -np.min(y_data))
+        lim = 0.25 if k == 0 else 0.20/1.1
+        x0 = np.linspace(-1.1*lim, 1.1*lim, 10)
+
+        dev = y_data - x_data
+        spread = np.std(dev)
+
+        ax = axes.flatten()[k]
+        ax.scatter(x_data, y_data, facecolor=colors, s=5)
+        ax.plot(x0, x0, linestyle='--', color='black')
+        if k == 0:
+            ax.set_xlim([0, 1.1*lim])
+            ax.set_ylim([0, 1.1*lim])
+        else:
+            ax.set_xlim([-1.1*lim, 1.1*lim])
+            ax.set_ylim([-1.1*lim, 1.1*lim])
+
+        ax.set_xlabel(r'Truth [rad]')
+        ax.set_ylabel(r'Prediction [rad]')
+        ax.set_aspect('equal')
+        ax.set_title(data_labels[k] + r' $\sigma$=%.3f rad' % spread)
+        ax.grid(True)
+    plt.tight_layout()
+    plt.show()
 
     fig, ax = plt.subplots(1, 1, dpi=100)
     sns.kdeplot(RMS_field_aber, RMS_after, shade=True, ax=ax)
