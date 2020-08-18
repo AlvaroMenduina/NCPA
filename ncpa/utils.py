@@ -184,13 +184,14 @@ def plot_actuator_commands(commands, centers, rho_aper, PIX, cmap='Reds', delta0
     for i, (xc, yc) in enumerate(cent):
         act_mask = (xx - xc)**2 + (yy - yc)**2 <= (delta/delta0)**2
         image += commands[i] * act_mask
-    plt.figure()
-    plt.imshow(image, cmap=cmap)
-    plt.colorbar()
-    plt.clim(min_val*image[np.nonzero(image)].min(), image.max())
-    plt.title(r'Residual Error Command')
 
-    return
+    fig, ax = plt.subplots(1, 1)
+    img = ax.imshow(image, cmap=cmap)
+    plt.colorbar(img, ax=ax)
+    img.set_clim(min_val*image[np.nonzero(image)].min(), image.max())
+    # plt.title(r'Residual Error Command')
+
+    return fig, ax
 
 def show_wavefronts(PSF_model, coefs, rho_aper, images=(2, 3), cmap='jet'):
     """

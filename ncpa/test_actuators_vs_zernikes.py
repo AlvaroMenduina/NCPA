@@ -12,6 +12,7 @@ Is Zernike polynomials better-suited than Actuator Commands models?
 import numpy as np
 from numpy.linalg import norm
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 import psf
 import utils
@@ -28,18 +29,18 @@ SPAX = 4.0                          # mas | spaxel scale
 RHO_APER = utils.rho_spaxel_scale(spaxel_scale=SPAX, wavelength=WAVE)
 RHO_OBSC = 0.30 * RHO_APER  # ELT central obscuration
 utils.check_spaxel_scale(rho_aper=RHO_APER, wavelength=WAVE)
-N_actuators = 25                    # Number of actuators in [-1, 1] line
+N_actuators = 22                    # Number of actuators in [-1, 1] line
 diversity = 0.30                    # Strength of extra diversity commands
 alpha_pc = 20                       # Height [percent] at the neighbour actuator (Gaussian Model)
 
 # Zernike model
-N_levels = 8                       # How many Zernike radial orders
+N_levels = 12                       # How many Zernike radial orders
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
 coef_strength = 1 / (2 * np.pi)     # Strength of the actuator coefficients
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
-layer_filters = [256, 128, 32, 8]    # How many filters per layer
+layer_filters = [128, 64, 32]    # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
 epochs = 50                         # Training epochs
@@ -140,6 +141,8 @@ if __name__ == """__main__""":
     rms0, rms_fit = calculate_rms_fit(train_coef_zern, train_coef_actu)
     rel_err = rms_fit / rms0 * 100      # percentage of RMS left over after fitting to actuators
 
+    print("\nLS Fit error: %.1f +- %.1f" % (np.mean(rel_err), np.std(rel_err)))
+
     fig, ax = plt.subplots(1, 1)
     ax.hist(rel_err, bins=50, histtype='step')
     ax.set_xlim([0, np.max(rel_err)])
@@ -195,6 +198,7 @@ if __name__ == """__main__""":
     plt.show()
 
     SNR = 500
+    epochs = 10
     # Train the Calibration Model on images with the nominal defocus
     calib_zern = calibration.Calibration(PSF_model=PSF_zernike)
     calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='relu')
@@ -202,27 +206,27 @@ if __name__ == """__main__""":
                                                 N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                                 readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
 
-    def calculate_rms_calibration(calibration_model, psf_model, test_images, test_coef):
-
-        guess_coef = calibration_model.cnn_model.predict(test_images)
-        residual_coef = test_coef - guess_coef
-        N_images = test_images.shape[0]
-        RMS_before = np.zeros(N_images)
-        RMS_after = np.zeros(N_images)
-        for k in range(N_images):
-            phase_before = np.dot(psf_model.model_matrix, test_coef[k])
-            phase_after = np.dot(psf_model.model_matrix, residual_coef[k])
-            RMS_before[k] = np.std(phase_before[psf_model.pupil_mask])
-            RMS_after[k] = np.std(phase_after[psf_model.pupil_mask])
-
-        return RMS_before, RMS_after
-
-    rms_before_zern, rms_after_zern = calculate_rms_calibration(calibration_model=calib_zern, psf_model=PSF_zernike,
-                                                                test_images=test_PSF_zern, test_coef=test_coef_zern)
-
-    # Evaluate performance
-    guess_coef_zern = calib_zern.cnn_model.predict(test_PSF_zern)
-    residual_coef_zern = test_coef_zern - guess_coef_zern
+    # def calculate_rms_calibration(calibration_model, psf_model, test_images, test_coef):
+    #
+    #     guess_coef = calibration_model.cnn_model.predict(test_images)
+    #     residual_coef = test_coef - guess_coef
+    #     N_images = test_images.shape[0]
+    #     RMS_before = np.zeros(N_images)
+    #     RMS_after = np.zeros(N_images)
+    #     for k in range(N_images):
+    #         phase_before = np.dot(psf_model.model_matrix, test_coef[k])
+    #         phase_after = np.dot(psf_model.model_matrix, residual_coef[k])
+    #         RMS_before[k] = np.std(phase_before[psf_model.pupil_mask])
+    #         RMS_after[k] = np.std(phase_after[psf_model.pupil_mask])
+    #
+    #     return RMS_before, RMS_after
+    #
+    # rms_before_zern, rms_after_zern = calculate_rms_calibration(calibration_model=calib_zern, psf_model=PSF_zernike,
+    #                                                             test_images=test_PSF_zern, test_coef=test_coef_zern)
+    #
+    # # Evaluate performance
+    # guess_coef_zern = calib_zern.cnn_model.predict(test_PSF_zern)
+    # residual_coef_zern = test_coef_zern - guess_coef_zern
 
     calib_actu = calibration.Calibration(PSF_model=PSF_actuators)
     calib_actu.create_cnn_model(layer_filters, kernel_size, name='NOM_ACTU', activation='relu')
@@ -244,6 +248,9 @@ if __name__ == """__main__""":
         guess_zern = calib_zern.cnn_model.predict(test_images)
         guess_actu = calib_actu.cnn_model.predict(test_images)
 
+        res_zern = np.zeros_like(zern_coef)
+        res_actu = np.zeros_like(actu_coef)
+
         # the residual before, and after calibration for each case
         RMS0 = np.zeros(N_images)
         RMS_zern = np.zeros(N_images)
@@ -260,11 +267,12 @@ if __name__ == """__main__""":
             guess_zern_phase = np.dot(PSF_zernike.model_matrix, guess_zern[k])
             res_zern_phase = true_phase - guess_zern_phase
             RMS_zern[k] = np.std(res_zern_phase[PSF_zernike.pupil_mask])
-            residual_zern = zern_coef[k] - guess_zern[k]
+            res_zern[k] = zern_coef[k] - guess_zern[k]
 
             guess_actu_phase = np.dot(PSF_actuators.model_matrix, guess_actu[k])
             res_actu_phase = true_phase - guess_actu_phase
             RMS_actu[k] = np.std(res_actu_phase[PSF_zernike.pupil_mask])
+            res_actu[k] = actu_coef[k] - guess_actu[k]
 
             extent = [-1, 1, -1, 1]
             cmap = 'seismic'
@@ -313,16 +321,23 @@ if __name__ == """__main__""":
 
                 # plt.tight_layout()
 
-        return RMS0, RMS_zern, RMS_actu, guess_zern, guess_actu
+        return RMS0, RMS_zern, RMS_actu, guess_zern, guess_actu, res_zern, res_actu
 
-    RMS0, RMS_zern, RMS_actu, guess_zern, guess_actu = compare_models(test_images=test_PSF_zern, zern_coef=test_coef_zern,
-                                                                      actu_coef=test_coef_actu)
-
+    results = compare_models(test_images=test_PSF_zern, zern_coef=test_coef_zern, actu_coef=test_coef_actu)
+    RMS0, RMS_zern, RMS_actu, guess_zern, guess_actu, res_zern, res_actu = results
     plt.show()
 
     print("\nPerformance Comparison:")
+    print("RMS before calibration: %.4f +- %.4f rad" % (np.mean(RMS0), np.std(RMS0)))
     print("Zernike Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_zern), np.std(RMS_zern)))
     print("Actuator Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_actu), np.std(RMS_actu)))
+
+    commands = np.mean(np.abs(res_actu), axis=0)
+    fig, ax = utils.plot_actuator_commands(commands=commands, centers=centers, rho_aper=RHO_APER, PIX=1024, cmap='Reds')
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
+    ax.set_title(r'Mean residual actuator command [rad]')
+    plt.show()
 
     corr_coef_zern = np.corrcoef(guess_zern.T)
     corr_coef_actu = np.corrcoef(guess_actu.T)
@@ -347,11 +362,11 @@ if __name__ == """__main__""":
     ax.hist(RMS_actu, bins=20, histtype='step')
     plt.show()
 
-    import seaborn as sns
     grid_size = 250
     fig, ax = plt.subplots(1, 1)
     sns.kdeplot(RMS0, RMS_zern, shade=True, ax=ax, label='Zernike', gridsize=grid_size)
     sns.kdeplot(RMS0, RMS_actu, shade=False, ax=ax, label='Actuator', color='white', gridsize=grid_size)
+    # ax.scatter(rms0, rms_fit, color='red', s=5)
     ax.set_xlim([0.05, 0.15])
     ax.set_ylim([0.0, 0.05])
     ax.legend(title=r'Calibration Model', facecolor='whitesmoke', loc=2)
@@ -372,13 +387,13 @@ if __name__ == """__main__""":
     plt.show()
 
     #
-    # RMS_evo_zern, final_res_zern = calib_zern.calibrate_iterations(test_images=test_PSF_zern, test_coefs=test_coef_zern,
-    #                                                                  wavelength=WAVE, N_iter=3)
+    RMS_evo_zern, final_res_zern = calib_zern.calibrate_iterations(test_images=test_PSF_zern, test_coefs=test_coef_zern,
+                                                                     wavelength=WAVE, N_iter=3)
     #
     # RMS_evo_actu, final_res_actu = calib_actu.calibrate_iterations(test_images=test_PSF_zern, test_coefs=test_coef_actu,
     #                                                                  wavelength=WAVE, N_iter=3)
     #
-    # calib_zern.plot_RMS_evolution(RMS_evolution=RMS_evo_zern)
+    calib_zern.plot_RMS_evolution(RMS_evolution=RMS_evo_zern)
     # calib_actu.plot_RMS_evolution(RMS_evolution=RMS_evo_actu)
     #
     # import seaborn as sns
