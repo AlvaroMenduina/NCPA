@@ -34,7 +34,7 @@ diversity = 0.30                    # Strength of extra diversity commands
 alpha_pc = 20                       # Height [percent] at the neighbour actuator (Gaussian Model)
 
 # Zernike model
-N_levels = 12                       # How many Zernike radial orders
+N_levels = 10                       # How many Zernike radial orders
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
@@ -68,7 +68,7 @@ if __name__ == """__main__""":
     centers = psf.actuator_centres(N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, radial=True)
     N_act = len(centers[0])
     psf.plot_actuators(centers, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
-    plt.show()
+    # plt.show()
 
     # Calculate the Actuator Model Matrix (Influence Functions)
     actuator_matrix, pupil_mask, flat_actuator = psf.actuator_matrix(centres=centers, alpha_pc=alpha_pc,
@@ -109,15 +109,15 @@ if __name__ == """__main__""":
     test_PSF_zern, test_coef_zern = calibration.generate_dataset(PSF_zernike, N_train, N_test,
                                                                  coef_strength, rescale)
 
-    peaks_nom = np.max(train_PSF_zern[:, :, :, 0], axis=(1, 2))
-    peaks_foc = np.max(train_PSF_zern[:, :, :, 1], axis=(1, 2))
-    utils.plot_images(train_PSF_zern)
-    plt.show()
-
-    plt.figure()
-    plt.scatter(np.arange(N_train), peaks_nom, s=2)
-    plt.scatter(np.arange(N_train), peaks_foc, s=2)
-    plt.show()
+    # peaks_nom = np.max(train_PSF_zern[:, :, :, 0], axis=(1, 2))
+    # peaks_foc = np.max(train_PSF_zern[:, :, :, 1], axis=(1, 2))
+    # utils.plot_images(train_PSF_zern)
+    # plt.show()
+    #
+    # plt.figure()
+    # plt.scatter(np.arange(N_train), peaks_nom, s=2)
+    # plt.scatter(np.arange(N_train), peaks_foc, s=2)
+    # plt.show()
 
     # Using a LS fit, calculate the Actuator commands that reproduce the Zernike phase maps
     train_coef_actu = zernike_fit.fit_zernike_wave_to_actuators(train_coef_zern, plot=True, cmap='RdBu').T
@@ -147,7 +147,7 @@ if __name__ == """__main__""":
     ax.hist(rel_err, bins=50, histtype='step')
     ax.set_xlim([0, np.max(rel_err)])
     ax.set_xlabel(r'Percentage of RMS after removing actuators')
-    plt.show()
+    # plt.show()
 
     # show some examples of Zernike Phase vs Actuator Phase
     N_ex = 3
@@ -191,8 +191,8 @@ if __name__ == """__main__""":
         plt.colorbar(img3, ax=ax3)
 
         # if k == 0:
-        ax1.set_title(r'Zernike $\sigma$=%.3f [rad]' % rms_zern)
-        ax2.set_title(r'Actuator LS fit [rad]')
+        ax1.set_title(r'Zernike ($N_{zern}$=%d) $\sigma$=%.3f [rad]' % (zernike_matrix.shape[-1], rms_zern))
+        ax2.set_title(r'Actuator ($N_{act}$=%d) LS fit [rad]' % N_act)
         ax3.set_title(r'Residual $\sigma$=%.3f [rad]' % rms_res)
     plt.tight_layout()
     plt.show()
@@ -341,6 +341,31 @@ if __name__ == """__main__""":
 
     corr_coef_zern = np.corrcoef(guess_zern.T)
     corr_coef_actu = np.corrcoef(guess_actu.T)
+
+    def actuator_correlation(corr_coef, centers, k_act, cmap='seismic'):
+
+        cent, delta = centers
+        delta0 = 4
+        PIX = 1024
+        x = np.linspace(-1.25 * RHO_APER, 1.25 * RHO_APER, PIX, endpoint=True)
+        xx, yy = np.meshgrid(x, x)
+        image = np.zeros((PIX, PIX))
+        for i, (xc, yc) in enumerate(cent):
+            act_mask = (xx - xc) ** 2 + (yy - yc) ** 2 <= (delta / delta0) ** 2
+            image += corr_coef[k_act][i] * act_mask
+
+        fig, ax = plt.subplots(1, 1)
+        img = ax.imshow(image, cmap=cmap)
+        img.set_clim([-1, 1])
+        plt.colorbar(img, ax=ax)
+        ax.xaxis.set_visible(False)
+        ax.yaxis.set_visible(False)
+        ax.set_title(r'Correlation Coefficients | Actuator #%d' % (k_act + 1))
+
+    for k in [90, 95]:
+        actuator_correlation(corr_coef_actu, centers, k_act=k)
+    plt.show()
+
 
     fig, (ax1, ax2) = plt.subplots(1, 2)
     img1 = ax1.imshow(corr_coef_zern, cmap='bwr')
