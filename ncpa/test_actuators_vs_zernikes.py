@@ -76,7 +76,7 @@ if __name__ == """__main__""":
     actuator_matrices = [actuator_matrix, pupil_mask, flat_actuator]
 
     # Create the PSF model using the Actuator Model for the wavefront
-    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
+    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=2*N_PIX,
                                             crop_pix=pix, diversity_coef=np.zeros(N_act))
 
     # Use Least Squares to find the actuator commands that mimic the Zernike defocus
@@ -93,12 +93,23 @@ if __name__ == """__main__""":
     plt.imshow(PSF_actuators.diversity_phase, cmap='RdBu')
     plt.colorbar()
     plt.title(r'Diversity Map | Defocus [rad]')
-    #
-    # plt.figure()
-    # plt.imshow(PSF_zernike.diversity_phase, cmap='RdBu')
-    # plt.colorbar()
-    # plt.title(r'Diversity Map | Defocus [rad]')
-    # plt.show()
+
+    # Show a random example of the phase
+    rand_coef = np.random.uniform(low=-1, high=1, size=N_act)
+    rand_phase = np.dot(actuator_matrix, rand_coef)
+    img_max = max(-np.min(rand_phase), np.max(rand_phase))
+    c = np.array(centers[0])
+    plt.figure()
+    img = plt.imshow(rand_phase, cmap='bwr', extent=[-1, 1, -1, 1])
+    img.set_clim([-img_max, img_max])
+    plt.scatter(c[:, 0], c[:, 1], color='black', s=10)
+    plt.colorbar(img)
+    plt.title(r'%d Actuators | Wavefront [rad]' % N_act)
+    plt.xlim([-1.1*RHO_APER, 1.1*RHO_APER])
+    plt.ylim([-1.1*RHO_APER, 1.1*RHO_APER])
+    plt.axes().xaxis.set_visible(False)
+    plt.axes().yaxis.set_visible(False)
+    plt.show()
 
     # ================================================================================================================ #
     #                    MACHINE LEARNING
@@ -339,8 +350,10 @@ if __name__ == """__main__""":
     ax.set_title(r'Mean residual actuator command [rad]')
     plt.show()
 
-    corr_coef_zern = np.corrcoef(guess_zern.T)
-    corr_coef_actu = np.corrcoef(guess_actu.T)
+    corr_coef_zern = np.corrcoef(res_zern.T)
+    corr_coef_actu = np.corrcoef(res_actu_fit)
+
+    res_actu_fit = zernike_fit.fit_actuator_wave_to_zernikes(res_actu)
 
     def actuator_correlation(corr_coef, centers, k_act, cmap='seismic'):
 
@@ -362,7 +375,7 @@ if __name__ == """__main__""":
         ax.yaxis.set_visible(False)
         ax.set_title(r'Correlation Coefficients | Actuator #%d' % (k_act + 1))
 
-    for k in [90, 95]:
+    for k in [6, 57]:
         actuator_correlation(corr_coef_actu, centers, k_act=k)
     plt.show()
 
@@ -374,7 +387,7 @@ if __name__ == """__main__""":
     ax1.set_title(r'Zernike Corr. Matrix')
     ax1.set_xlabel(r'Coefficient #')
 
-    img2 = ax2.imshow(corr_coef_actu, cmap='bwr')
+    img2 = ax2.imshow(corr_coef_actu - corr_coef_zern, cmap='bwr')
     plt.colorbar(img2, ax=ax2, orientation='horizontal')
     img2.set_clim(-1, 1)
     ax2.set_title(r'Actuator Corr. Matrix')
@@ -431,5 +444,85 @@ if __name__ == """__main__""":
     # ax.set_xlim([0.02, 0.16])
     # ax.set_ylim([0.002, 0.016])
     # plt.show()
+
+    # Compare the PSF
+    eps = 1e-4
+    k_act = 6
+    act_cent = np.array(centers[0])
+    xc, yc = act_cent[k_act]
+    k_x = np.argwhere(np.abs(act_cent[:, 0] + xc) < eps)
+    k_y = np.argwhere(np.abs(act_cent[:, 1] + yc) < eps)
+    k_opp = np.intersect1d(k_x, k_y)[0]
+    # k_opp = k_act
+
+    print("Actuator #%d: [%.4f, %.4f]" % (k_act, xc, yc))
+    print("Actuator #%d: [%.4f, %.4f]" % (k_opp, act_cent[k_opp][0], act_cent[k_opp][1]))
+
+    alpha = 10.0
+    coef = np.zeros(N_act)
+    coef_opp = coef.copy()
+    coef[k_act] = alpha
+    # coef[k_opp] = alpha
+    psf, _s = PSF_actuators.compute_PSF(coef)
+
+    coef_opp = np.zeros(N_act)
+    # coef_opp[k_act] = -alpha
+    coef_opp[k_opp] = -alpha
+    psf_opp, _s = PSF_actuators.compute_PSF(coef_opp)
+
+    MAX = np.max(psf)
+
+    cmap_phase = 'RdBu'
+    cmap_psf = 'plasma'
+    fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
+
+    img1 = ax1.imshow(psf, cmap=cmap_psf)
+    img1.set_clim([0, MAX])
+    plt.colorbar(img1, ax=ax1)
+    ax1.xaxis.set_visible(False)
+    ax1.yaxis.set_visible(False)
+    ax1.set_title(r'PSF | Actuator #%d (+)' % (k_act + 1))
+
+    img2 = ax2.imshow(psf_opp, cmap=cmap_psf)
+    img2.set_clim([0, MAX])
+    plt.colorbar(img2, ax=ax2)
+    ax2.xaxis.set_visible(False)
+    ax2.yaxis.set_visible(False)
+    ax2.set_title(r'PSF | Actuator #%d (-)' % (k_opp + 1))
+
+    diff = psf - psf_opp
+    cmax = max(-np.min(diff), np.max(diff))
+    img3 = ax3.imshow(diff, cmap='bwr')
+    plt.colorbar(img3, ax=ax3)
+    img3.set_clim([-cmax, cmax])
+    ax3.xaxis.set_visible(False)
+    ax3.yaxis.set_visible(False)
+    ax3.set_title(r'PSF difference')
+
+    phase = np.dot(PSF_actuators.model_matrix, coef)
+    img4 = ax4.imshow(phase / alpha + 0.1 * PSF_actuators.pupil_mask, cmap=cmap_phase, extent=[-1, 1, -1, 1])
+    img4.set_clim([-1, 1])
+    plt.colorbar(img4, ax=ax4)
+    ax4.set_xlim([-RHO_APER, RHO_APER])
+    ax4.set_ylim([-RHO_APER, RHO_APER])
+    ax4.xaxis.set_visible(False)
+    ax4.yaxis.set_visible(False)
+    ax4.set_title(r'Influence Function | Actuator #%d (+)' % (k_act + 1))
+
+    phase_opp = np.dot(PSF_actuators.model_matrix, coef_opp)
+    img5 = ax5.imshow(phase_opp / alpha + 0.1 * PSF_actuators.pupil_mask, cmap=cmap_phase, extent=[-1, 1, -1, 1])
+    img5.set_clim([-1, 1])
+    plt.colorbar(img5, ax=ax5)
+    ax5.set_xlim([-RHO_APER, RHO_APER])
+    ax5.set_ylim([-RHO_APER, RHO_APER])
+    ax5.xaxis.set_visible(False)
+    ax5.yaxis.set_visible(False)
+    ax5.set_title(r'Influence Function | Actuator #%d (-)' % (k_opp + 1))
+
+    fig.delaxes(ax6)
+
+    plt.show()
+
+
 
 
