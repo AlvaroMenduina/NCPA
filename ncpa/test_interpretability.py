@@ -1,9 +1,30 @@
 """
 
+        ~~ || Interpreting the CNN predictions || ~~
 
+Author: Alvaro Menduina
+Date: August 2020
+
+Description: with this script, we try to interpret and understand the predictions
+of a calibration model (CNN) that uses an Actuator-based wavefront description
+
+For this purpose we use Shapley values, a game theory method to distribute
+payouts among player of a collective game, based on the total payout and their
+relative contributions.
+
+In this case, the 'payout' would be the (marginal) predictions of the CNN for
+the actuator commands, and the 'players' would be the pixel features of the
+PSF images (in-focus and defocused).
+
+From that perspective, the Shapley values are a measure of feature importance
+and tell us what particular pixel features the calibration model is using
+to predict the coefficients
+
+At the end of the script we also visualize the activation of the convolutional layers
+to get a feel for what the model is doing
 """
 
-
+from time import time
 import numpy as np
 from numpy.linalg import norm
 import matplotlib.pyplot as plt
@@ -20,6 +41,7 @@ import shap
 N_PIX = 256                         # pixels for the Fourier arrays
 pix = 32                            # pixels to crop the PSF images
 WAVE = 1.5                          # microns | reference wavelength
+# We oversample to 2.0 mas pixels to properly see the PSF features in the Shapley values
 SPAX = 2.0                          # mas | spaxel scale
 RHO_APER = utils.rho_spaxel_scale(spaxel_scale=SPAX, wavelength=WAVE)
 RHO_OBSC = 0.30 * RHO_APER  # ELT central obscuration
@@ -38,20 +60,9 @@ input_shape = (pix, pix, 2,)
 epochs = 10                         # Training epochs
 SNR = 500
 
-
-def generate_pixel_ids(N_pixels):
-    """
-    Generate Labels for each pixel according to their (i,j) index
-    """
-    central_pix = N_pixels // 2
-    x = list(range(N_pixels))
-    xx, yy = np.meshgrid(x, x)
-    xid = xx.reshape((N_pixels * N_pixels))
-    yid = yy.reshape((N_pixels * N_pixels))
-
-    labels = ["(%d, %d)" % (x - central_pix, y - central_pix) for (x, y) in zip(xid, yid)]
-    return labels
-
+def hide_axes(ax):
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
 
 if __name__ == """__main__""":
 
@@ -61,7 +72,7 @@ if __name__ == """__main__""":
     # (1) We begin by creating a Zernike PSF model with Defocus as diversity
     zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=5, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
-                                                                          N_PIX=N_PIX, radial_oversize=1.1)
+                                                                          N_PIX=N_PIX, radial_oversize=1.0)
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
     PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=N_PIX,
                                           crop_pix=pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
@@ -81,7 +92,6 @@ if __name__ == """__main__""":
                                                                      rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
 
     actuator_matrices = [actuator_matrix, pupil_mask, flat_actuator]
-    diversity_actuators = 1 / (2 * np.pi) * np.random.uniform(-1, 1, size=N_act)
 
     # Create the PSF model using the Actuator Model for the wavefront
     PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
@@ -97,47 +107,41 @@ if __name__ == """__main__""":
     diversity_defocus = defocus_actuators
     PSF_actuators.define_diversity(diversity_defocus)
 
-    plt.figure()
-    plt.imshow(PSF_actuators.diversity_phase, cmap='RdBu')
-    plt.colorbar()
-    plt.title(r'Diversity Map | Defocus [rad]')
-    plt.show()
+    # At this point we have our PSF actuator model ready
+
+    # ================================================================================================================ #
+    #                                         Train the Machine Learning model                                         #
+    # ================================================================================================================ #
 
     calib_actu = calibration.Calibration(PSF_model=PSF_actuators)
     calib_actu.create_cnn_model(layer_filters, kernel_size, name='NOM_ACTU', activation='relu')
-    epochs = 10
-    # rms_train = []
-    # for k in range(5):
 
+    # We create the different PSF images for training and testing the performance
     train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, N_train, N_test,
-                                                                              coef_strength=coef_strength,
-                                                                              rescale=rescale)
+                                                                              coef_strength=coef_strength, rescale=rescale)
 
-    # Add some Readout Noise to the PSF images to spice things up
-    # SNR_READOUT = 750
-    SNR = 250
-    noise_model = noise.NoiseEffects()
-    train_PSF_readout = noise_model.add_readout_noise(train_PSF, RMS_READ=1./SNR)
-    test_PSF_readout = noise_model.add_readout_noise(test_PSF, RMS_READ=1./SNR)
-
-
+    # We train the calibration model [NO NOISE]
     losses = calib_actu.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
-                                                N_loops=3, epochs_loop=5, verbose=1, batch_size_keras=32,
-                                                plot_val_loss=False,
-                                                readout_noise=True, RMS_readout=[1. / SNR], readout_copies=3)
+                                                N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
+                                                plot_val_loss=False, readout_noise=False)
 
     # evaluate the RMS performance
-    guess_actu = calib_actu.cnn_model.predict(test_PSF_readout)
+    guess_actu = calib_actu.cnn_model.predict(test_PSF)
     residual_coef = test_coef - guess_actu
 
-    RMS = np.zeros(N_test)
+    RMS0, RMS = np.zeros(N_test), np.zeros(N_test)
     for k in range(N_test):
+        ini_phase = np.dot(PSF_actuators.model_matrix, test_coef[k])
         res_phase = np.dot(PSF_actuators.model_matrix, residual_coef[k])
+        RMS0[k] = np.std(ini_phase[PSF_actuators.pupil_mask])
         RMS[k] = np.std(res_phase[PSF_actuators.pupil_mask])
+    meanRMS0 = np.mean(RMS0)
     meanRMS = np.mean(RMS)
-    # rms_train.append(meanRMS)
-    print(meanRMS)
+    print("\nCalibration Model Performance:")
+    print("Mean RMS before calibration: %.4f rad" % meanRMS0)
+    print("Mean RMS after calibration: %.4f rad" % meanRMS)
 
+    # Show an example of the true wavefront and the one guessed by the calibration model
     fig, (ax1, ax2) = plt.subplots(1, 2)
     phase0 = np.dot(PSF_actuators.model_matrix, test_coef[0])
     clim = max(-np.min(phase0), np.max(phase0))
@@ -154,48 +158,52 @@ if __name__ == """__main__""":
     ax2.set_ylim([-RHO_APER, RHO_APER])
     plt.show()
 
-
-
     # ================================================================================================================ #
-    #                                  SHAP values
+    #                                               Shapley values                                                     #
     # ================================================================================================================ #
 
-    from time import time
     start = time()
-    N_background = 50
-    N_shap_samples = 50
+    N_background = 50           # How many PSF images from training we use as Background for the Shapley
+    N_shap_samples = 50         # How many samples from the test set to use in the Shapley calculations
     clean_background = train_PSF[np.random.choice(N_train, N_background, replace=False)]
-    clean_explainer = shap.DeepExplainer(calib_actu.cnn_model, clean_background)
+    deep_expainer = shap.DeepExplainer(calib_actu.cnn_model, clean_background)
 
     # Select only the first N_shap from the test set
-    test_shap = test_PSF[:N_shap_samples]
-    test_shap_coef = test_coef[:N_shap_samples]
-    guess_shap_coef = guess_actu[:N_shap_samples]
-    clean_shap_values = clean_explainer.shap_values(test_shap)
+    test_PSF_shap = test_PSF[:N_shap_samples]
+    test_coef_shap = test_coef[:N_shap_samples]
+    guess_coef_shap = guess_actu[:N_shap_samples]
+    shap_values = deep_expainer.shap_values(test_PSF_shap)
     total_time = time() - start
     print("Computed SHAP values for %d samples | %d background in: %.1f sec" % (N_shap_samples, N_background, total_time))
 
-    # (1) The impact of pixel values.
-    pix_label = generate_pixel_ids(pix)
-    for k_chan in [0, 1]:
-        j_act = 2
-        shap_val_chan = [x[:, :, :, k_chan].reshape((N_shap_samples, pix*pix)) for x in clean_shap_values]
-        features_chan = test_shap[:, :, :, k_chan].reshape((N_shap_samples, pix*pix))
-
-        shap.summary_plot(shap_values=shap_val_chan[j_act], features=features_chan,
-                          feature_names=pix_label)
 
     def show_shap_example(shap_values, test_PSF_shap, test_coef, guess_coef, i_exa, j_actu):
+        """
+        Show an example of the Shapley value
+
+        It will show both in-focus and defocused PSF (linear and log scale)
+        for a chosen example from the test set (i_exa) followed by the
+        Shapley values for a particular actuator (j_actu)
+
+        :param shap_values: a list of len(N_act) containing the Shapley values [N_PSF, pix, pix, 2]
+        :param test_PSF_shap: the test PSF images associated with the Shapley values [N_PSF, pix, pix, 2]
+        :param test_coef: the true actuator coefficients for those test PSF images [N_PSF, N_act]
+        :param guess_coef: the guessed coefficients from the calibration mode [N_PSF, N_act]
+        :param i_exa: index for the example that we want to show
+        :param j_actu: index for the actuator command for which we want the Shapley values
+        :return:
+        """
 
         # Compute how that actuator affects the PSF
 
-        shap_val_nom = shap_values[j_actu][i_exa, :, :, 0]
-        shap_val_foc = shap_values[j_actu][i_exa, :, :, 1]
+        shap_val_nom = shap_values[j_actu][i_exa, :, :, 0]          # Shapley values for the In-focus channel
+        shap_val_foc = shap_values[j_actu][i_exa, :, :, 1]          # Shapley values for the Defocused channel
+        # Use the same clim for both Shapley maps to properly compare the two channels
         smax_nom = max(-np.min(shap_val_nom), np.max(shap_val_nom))
         smax_foc = max(-np.min(shap_val_foc), np.max(shap_val_foc))
         MAX = max(smax_nom, smax_foc)
 
-
+        # Get the PSF image chanels
         img_nom = test_PSF_shap[i_exa, :, :, 0]
         img_foc = test_PSF_shap[i_exa, :, :, 1]
 
@@ -229,12 +237,13 @@ if __name__ == """__main__""":
         ax6.set_title(r'SHAP [Actuator #%d] Prediction: %.3f' % (j_actu + 1, guess_coef[i_exa, j_actu]))
         plt.colorbar(im6, ax=ax6)
 
-
+    # Show a couple of examples for a given actuator command
     for k in range(3):
-        show_shap_example(shap_values=clean_shap_values, test_PSF_shap=test_shap, test_coef=test_shap_coef,
-                          guess_coef=guess_shap_coef, i_exa=k+6, j_actu=0)
+        show_shap_example(shap_values=shap_values, test_PSF_shap=test_PSF_shap, test_coef=test_coef_shap,
+                          guess_coef=guess_coef_shap, i_exa=k, j_actu=0)
     plt.show()
 
+    # If we want to compare actuators that are diametrically opposed, we can find the index for the opposite actuator
     eps = 1e-4
     k_act = 0
     act_cent = np.array(centers[0])
@@ -242,54 +251,82 @@ if __name__ == """__main__""":
     k_x = np.argwhere(np.abs(act_cent[:, 0] + xc) < eps)
     k_y = np.argwhere(np.abs(act_cent[:, 1] + yc) < eps)
     k_opp = np.intersect1d(k_x, k_y)[0]
-    # k_opp = k_act
 
     print("Actuator #%d: [%.4f, %.4f]" % (k_act, xc, yc))
     print("Actuator #%d: [%.4f, %.4f]" % (k_opp, act_cent[k_opp][0], act_cent[k_opp][1]))
 
+    def show_multiple_examples(shap_values, test_coef_shap, j_actu, n_row=4, n_col=5):
+        """
+        Here we show the Shapley values for a particular actuator
+        across multiple PSF images (only in-focus channel), to see if
+        some of the features are repeated
 
-    # ( ) For a given actuator, we show what features have been determined the predicted value
-    # across multiple test PSF images. If the command was positive, we only look at the positive Shapley (in Red)
+        To facilitate this, we split the Shapley values by their sign
+        according to the value of the actuator command for a given PSF image
+        In other words, if the actuator command is positive we only show the positive Shapley
+        to see which features contributed positively to that prediction
 
-    j_act = 0       # Which actuator we want to look at
-    cc = clean_shap_values[j_act][:, :, :, 0]       # show the In-Focus Shapley
-    n_row, n_col = 4, 5
-    fig, axes = plt.subplots(n_row, n_col, dpi=150)
-    for k in range(n_row * n_col):
-        ax = axes.flatten()[k]
-        c = cc[k + 20]   # We get the Shapley for that test PSF image
-        command = test_shap_coef[k + 20, j_act]      # We get the actuator command for that test PSF image
+        :param shap_values: a list of len(N_act) containing the Shapley values [N_PSF, pix, pix, 2]
+        :param test_coef_shap: the true actuator coefficients for those test PSF images [N_PSF, N_act]
+        :param j_actu: index for the actuator command for which we want the Shapley values
+        :param n_row: how many rows for the image grid
+        :param n_col: how many columns for the image grid
+        :return:
+        """
 
-        if command > 0.0:
-            # If the command is positive, we mask out the negative value and show the positive Shapley in red
-            c_mask = c > 0.0
-            img = ax.imshow(np.abs(c) * c_mask, cmap='Reds', origin='lower')
-            clim = max(0, np.max(c))
-            img.set_clim(0, clim)
+        cc = shap_values[j_actu][:, :, :, 0]  # show the In-Focus Shapley
+        fig, axes = plt.subplots(n_row, n_col, dpi=150)
+        for k in range(n_row * n_col):
+            ax = axes.flatten()[k]
+            c = cc[k]  # We get the Shapley for that test PSF image
+            command = test_coef_shap[k, j_actu]  # We get the actuator command for that test PSF image
 
-        if command < 0.0:
-            # If the command is negative, we mask out the positive value and show the negative Shapley in blue
-            c_mask = c < 0.0
-            img = ax.imshow(np.abs(c) * c_mask, cmap='Blues', origin='lower')
-            clim = max(0, -np.min(c))
-            img.set_clim(0, clim)
-        # We specify the value of the actuator command so that we can compare similar cases
-        ax.set_title("%.3f" % command)
-        ax.xaxis.set_visible(False)
-        ax.yaxis.set_visible(False)
-    plt.tight_layout()
-    plt.show()
+            if command > 0.0:
+                # If the command is positive, we mask out the negative value and show the positive Shapley in red
+                c_mask = c > 0.0
+                img = ax.imshow(np.abs(c) * c_mask, cmap='Reds', origin='lower')
+                clim = max(0, np.max(c))
+                img.set_clim(0, clim)
 
-    # ( )
+            if command < 0.0:
+                # If the command is negative, we mask out the positive value and show the negative Shapley in blue
+                c_mask = c < 0.0
+                img = ax.imshow(np.abs(c) * c_mask, cmap='Blues', origin='lower')
+                clim = max(0, -np.min(c))
+                img.set_clim(0, clim)
+            # We specify the value of the actuator command so that we can compare similar cases
+            ax.set_title("%.3f" % command)
+            ax.xaxis.set_visible(False)
+            ax.yaxis.set_visible(False)
+        plt.tight_layout()
+        plt.show()
 
-    def reds_and_blues(clean_shap_values, test_shap_coef, j_act, channel):
+    show_multiple_examples(shap_values, test_coef_shap, j_actu=0)
+
+
+    def reds_and_blues(shap_values, test_coef_shap, j_actu, channel):
+        """
+        Get the Shapley values and the test_coef
+        and split the values according to the sign of the command
+        for that particular test PSF
+
+        We need this to average the positive / negative Shapley values
+        across many test PSF cases to see which features are preferentially
+        used to identify a given actuator
+
+        :param shap_values: a list of len(N_act) containing the Shapley values [N_PSF, pix, pix, 2]
+        :param test_coef_shap: the true actuator coefficients for those test PSF images [N_PSF, N_act]
+        :param j_actu: index for the actuator command for which we want the Shapley values
+        :param channel: which channel to use, 0: in-focus, 1: defocused
+        :return:
+        """
 
         reds, blues = [], []
         for k_exa in range(N_shap_samples):
-            s_val = clean_shap_values[j_act][k_exa, :, :, channel]
-            command = test_shap_coef[k_exa, j_act]
+            s_val = shap_values[j_actu][k_exa, :, :, channel]
+            command = test_coef_shap[k_exa, j_actu]
             if command > 0.0:
-                # we select the
+                # we select only the positive Shapley, masking the negative values
                 c_mask = s_val > 0.0
                 red = c_mask * s_val
                 reds.append(red)
@@ -300,65 +337,73 @@ if __name__ == """__main__""":
 
         pos_shap = np.mean(np.array(reds), axis=0)
         neg_shap = np.mean(np.array(blues), axis=0)
+
         return pos_shap, neg_shap
 
-    def average_delta_psf(j_act, channel):
+    def average_delta_psf(j_actu, channel):
+        """
+        The changes in the PSF induced by poking a particular actuator
+        (what we call the differential features), slightly depend on the
+        underlying wavefront map
 
-        # Calculate the average change in PSF features when poking that actuator
+        Thus, we want to average that out by simulating many PSF images
+        with random wavefront errors and poking the actuator
+
+        :param j_actu: index for the actuator we want to poke
+        :param channel: which PSF channel to simulate
+        :return:
+        """
+
+
         diffs = []
         for k in range(50):
+            # Create some random wavefront error
             new_coef = np.random.uniform(low=-coef_strength, high=coef_strength, size=N_act)
             if channel == 1:        # the defocus
                 new_coef += diversity_defocus
             psf0, s0 = PSF_actuators.compute_PSF(new_coef)
-            new_coef[j_act] += 0.01
+
+            # Now calculate the PSF after slightly poking the chosen actuator
+            new_coef[j_actu] += 0.01
             psf_actu, sactu = PSF_actuators.compute_PSF(new_coef)
             psf_diff = psf_actu - psf0
             diffs.append(psf_diff)
 
+        # Calculate the average change in PSF features when poking that actuator
         mean_diff = np.mean(np.array(diffs), axis=0)
         mean_diff /= np.max(np.abs(mean_diff))
 
         return mean_diff
 
-    def hide_axes(ax):
-        ax.xaxis.set_visible(False)
-        ax.yaxis.set_visible(False)
+    def compare_shapley_to_diff_feat(shap_values, test_coef_shap, j_actu):
 
-    for j_act in [-1, -2]:
-
-        pos_shap_nom, neg_shap_nom = reds_and_blues(clean_shap_values, test_shap_coef, j_act, channel=0)
-        pos_shap_foc, neg_shap_foc = reds_and_blues(clean_shap_values, test_shap_coef, j_act, channel=1)
-        # pos_array[j_act] = pos_shap_nom
+        # Calculate the average Shapley values across all PSF images for both channels
+        pos_shap_nom, neg_shap_nom = reds_and_blues(shap_values, test_coef_shap, j_actu, channel=0)
+        pos_shap_foc, neg_shap_foc = reds_and_blues(shap_values, test_coef_shap, j_actu, channel=1)
 
         # Calculate the average change in PSF features when poking that actuator
-        mean_diff_nom = average_delta_psf(j_act, channel=0)
-        mean_diff_foc = average_delta_psf(j_act, channel=1)
+        mean_diff_nom = average_delta_psf(j_actu, channel=0)
+        mean_diff_foc = average_delta_psf(j_actu, channel=1)
 
         fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, dpi=100)
         img1 = ax1.imshow(pos_shap_nom, cmap='Reds', origin='lower')
-        # plt.colorbar(img1, ax=ax1)
         ax1.set_title(r'Mean (+) Shapley')
         ax1.text(5.5, 0.9, 'In-focus',{'color': 'black', 'fontsize': 10, 'ha': 'center', 'va': 'center',
                                    'bbox': dict(boxstyle="round", fc="white", ec="black", pad=0.2)})
 
-
         img2 = ax2.imshow(-neg_shap_nom, cmap='Blues', origin='lower')
-        # plt.colorbar(img2, ax=ax2)
         ax2.set_title(r'Mean (-) Shapley')
 
+        # Turn it into a modified log scale to highlight the features
         img3 = ax3.imshow(np.log10(1 + 5*np.abs(mean_diff_nom)), cmap='Reds', origin='lower')
         # img3 = ax3.imshow(np.abs(mean_diff), cmap='Reds', origin='lower')
-        # plt.colorbar(img3, ax=ax3)
         ax3.set_title(r'Mean PSF change')
 
         img4 = ax4.imshow(pos_shap_foc, cmap='Reds', origin='lower')
-        # plt.colorbar(img1, ax=ax1)
         ax4.text(5.50, 0.9, 'Defocus',{'color': 'black', 'fontsize': 10, 'ha': 'center', 'va': 'center',
                                    'bbox': dict(boxstyle="round", fc="white", ec="black", pad=0.2)})
 
         img5 = ax5.imshow(-neg_shap_foc, cmap='Blues', origin='lower')
-        # plt.colorbar(img2, ax=ax2)
 
         img6 = ax6.imshow(np.log10(1 + 5*np.abs(mean_diff_foc)), cmap='Reds', origin='lower')
 
@@ -366,15 +411,150 @@ if __name__ == """__main__""":
         for ax in fig.axes:
             hide_axes(ax)
 
+        return
+
+    # Show the comparison between differential features and Shapley values
+    for j_actu in [-1, -2]:
+        compare_shapley_to_diff_feat(shap_values, test_coef_shap, j_actu)
+
     plt.show()
+
+    # ================================================================================================================ #
+    #                         Visualising the Activation for each Convolutional Layer                                  #
+    # ================================================================================================================ #
+
+
+    def calculate_activations(calibration_model, img_tensor, plot=False):
+        """
+        Calculate the Activation for each convolution layer
+        in the calibration model. We give a PSF image (in-focus + defocused channels)
+        and visualize the outputs of the convolutional layers
+
+        :param calibration_model:
+        :param img_tensor: a [1, pix, pix, 2] PSF image datacube
+        :param plot:
+        :return:
+        """
+
+        model = calibration_model.cnn_model
+        layer_outputs = [layer.get_output_at(0) for layer in model.layers]      # get the outputs of the layers
+        # Construct a model that receives the input of the calibration CNN model and produces as output
+        # the activations
+        activation_model = models.Model(inputs=model.input, outputs=layer_outputs)
+
+        # Get the activations for the given image tensor
+        activations = activation_model.predict(img_tensor)
+        print(activations[-1])  # the guessed
+
+        layer_names = ['Convolution_1', 'Convolution_2']
+
+        # To properly see what areas are being masked with 0.0
+        # we use the colormap Reds, and will "set as white values under X" with X = epsilon
+        cmap = plt.get_cmap('Reds')
+        cmap.set_under('white')
+
+        images_per_row = 4
+        grids = []
+
+        for k, (layer_name, layer_activation) in enumerate(zip(layer_names, activations)):  # Displays the feature maps
+
+            n_features = layer_activation.shape[-1]  # Number of features in the feature map
+            size = layer_activation.shape[1]  # The feature map has shape (1, size, size, n_features).
+            print(size)
+            n_cols = n_features // images_per_row  # Tiles the activation channels in this matrix
+            display_grid = np.zeros((size * n_cols, images_per_row * size))
+
+            for col in range(n_cols):  # Tiles each filter into a big horizontal grid
+                for row in range(images_per_row):
+                    channel_image = layer_activation[0, :, :, col * images_per_row + row]
+                    # channel_image -= channel_image.mean()  # Post-processes the feature to make it visually palatable
+                    # channel_image /= channel_image.std()
+                    # channel_image *= 64
+                    # channel_image += 128
+                    # channel_image = np.clip(channel_image, 0, 255).astype('uint8')
+                    display_grid[col * size: (col + 1) * size,  # Displays the grid
+                    row * size: (row + 1) * size] = channel_image[::-1, :]  # origin 'lower' convention
+
+            grids.append(display_grid)
+
+            if plot:
+                scale = 2. / size
+                fig, (ax1, ax2) = plt.subplots(1, 2)
+                img1 = ax1.imshow(img_tensor[0, :, :, 0], cmap='plasma', origin='lower')
+                ax1.set_title(r'In-focus PSF')
+                img2 = ax2.imshow(display_grid, cmap=cmap, vmin=np.spacing(0.0))
+                ax2.set_title(r'Convolution Layer #%d Outputs' % (k + 1))
+                for ax in fig.axes:
+                    hide_axes(ax)
+
+        return grids
+
+    grids = calculate_activations(calibration_model=calib_actu, img_tensor=test_PSF[0:1], plot=True)
+    plt.show()
+
+    def compare_activations(calibration_model, j_actu):
+        """
+        We investigate how poking one actuator modifies the activations
+        Calculate the PSF before and after slighly poking the actuator
+        and take the difference between the convolutional layer
+        activations
+
+        :param calibration_model:
+        :param j_actu:
+        :return:
+        """
+
+        layer_activations = []
+        # rand_coef = np.random.uniform(low=-coef_strength, high=coef_strength, size=N_act)
+        for alpha in [0.5, 0.55]:
+
+            # Compute the in-focus and defocused PSF images for a given actuator
+            coef_zero = np.zeros(N_act)
+            coef_zero[j_actu] = alpha * coef_strength
+            PSF, _s = PSF_actuators.compute_PSF(coef_zero)
+            PSF_foc, _s = PSF_actuators.compute_PSF(coef_zero + diversity_defocus)
+            PSF_array = np.zeros((1, pix, pix, 2))
+            PSF_array[:, :, :, 0] = PSF
+            PSF_array[:, :, :, 1] = PSF_foc
+            img_tensor = PSF_array
+
+            # Calculate the activations
+            activations = calculate_activations(calibration_model, img_tensor, False)
+            layer_activations.append(activations)
+
+        nominal_activation = layer_activations[0]
+        new_activation = layer_activations[1]
+        N_layers = len(nominal_activation)
+        layer_names = ['Convolutional #%d Differential Output' % (i + 1) for i in range(N_layers)]
+
+        for k in range(N_layers):
+
+            size = nominal_activation[k].shape[1]
+            scale = 8. / size
+            plt.figure(figsize=(scale * new_activation[k].shape[1], scale * new_activation[k].shape[0]))
+            plt.grid(False)
+            im = new_activation[k] - nominal_activation[k]
+            plt.imshow(im, aspect='auto', cmap='seismic')
+            im_max = max(-np.min(im), np.max(im))
+            plt.clim(-im_max, im_max)
+            plt.title(layer_names[k] + r' | Actuator #%d' % (j_actu + 1))
+            plt.axes().xaxis.set_visible(False)
+            plt.axes().yaxis.set_visible(False)
+
+        return
+
+    compare_activations(calib_actu, j_actu=0)
+    plt.show()
+
+    # ================================================================================================================ #
 
     ### Average of importance across all Actuator commands
     pos_array_nom = np.zeros((N_act, pix, pix))
     pos_array_foc = np.zeros((N_act, pix, pix))
     for j_act in range(N_act):
 
-        pos_shap_nom, neg_shap_nom = reds_and_blues(clean_shap_values, test_shap_coef, j_act, channel=0)
-        pos_shap_foc, neg_shap_foc = reds_and_blues(clean_shap_values, test_shap_coef, j_act, channel=1)
+        pos_shap_nom, neg_shap_nom = reds_and_blues(shap_values, test_shap_coef, j_act, channel=0)
+        pos_shap_foc, neg_shap_foc = reds_and_blues(shap_values, test_shap_coef, j_act, channel=1)
         pos_array_nom[j_act] = pos_shap_nom
         pos_array_foc[j_act] = pos_shap_foc
 
@@ -420,176 +600,7 @@ if __name__ == """__main__""":
     #     hide_axes(ax)
     plt.show()
 
-    j_act = 3
-    diffs = []
-    for k in range(25):
-        new_coef = np.random.uniform(low=-coef_strength, high=coef_strength, size=N_act)
-        # new_coef += diversity_defocus
-        psf0, s0 = PSF_actuators.compute_PSF(new_coef)
-        new_coef[j_act] += 0.01
-        psf_actu, sactu = PSF_actuators.compute_PSF(new_coef)
-        psf_diff = psf_actu - psf0
-        diffs.append(psf_diff)
 
-        # diff_max = max(-np.min(psf_diff), np.max(psf_diff))
-        # fig, ax1 = plt.subplots(1, 1)
-        #
-        # im1 = ax1.imshow(psf_diff, cmap='bwr')
-        # im1.set_clim(-diff_max, diff_max)
-        # plt.colorbar(im1, ax=ax1)
-    # plt.show()
-
-    mean_diff = np.mean(np.array(diffs), axis=0)
-    mean_diff /= np.max(mean_diff)
-    plt.figure()
-    plt.imshow(np.log10(1 + np.abs(mean_diff)), cmap='Reds')
-    plt.show()
-
-    # correlation between channels?
-
-    for j_act in range(N_act):
-        shap_nom = clean_shap_values[j_act][:, :, :, 0].reshape((N_shap_samples, pix**2))
-        shap_foc = clean_shap_values[j_act][:, :, :, 1].reshape((N_shap_samples, pix**2))
-        corr_shap = np.zeros(N_shap_samples)
-        for k in range(N_shap_samples):
-            # plt.scatter(shap_nom[k], shap_foc[k], s=3)
-            corr_shap[k] = np.corrcoef(shap_nom[k], shap_foc[k])[0, 1]
-        plt.hist(corr_shap, bins=15, histtype='step')
-    plt.show()
-
-    shsh = np.array(clean_shap_values)[:, :, :, :, 0]
-    shsh = shsh.reshape((N_act, -1))
-    csh = np.corrcoef(shsh)
-
-    from sklearn.decomposition import PCA
-
-    N_comp = 10
-    pca = PCA(n_components=N_comp)
-    pca.fit(X=shap_nom)
-
-    for i in range(N_comp):
-        comp = pca.components_[i].reshape((pix, pix))
-        fig, ax = plt.subplots(1, 1)
-        img = ax.imshow(comp, cmap='bwr')
-        clim = max(-np.min(comp), np.max(cnomp))
-        img.set_clim(-clim, clim)
-        plt.colorbar(img, ax=ax)
-
-
-    # layer_names = []
-    # for layer in model.layers[:2]:
-    #     layer_names.append(layer.name)  # Names of the layers, so you can have them as part of your plot
-
-
-    def calculate_activations(img_tensor, plot=False):
-
-        model = calib_actu.cnn_model
-        layer_outputs = [layer.get_output_at(0) for layer in model.layers]  # Extracts the outputs of the top 12 layers
-        activation_model = models.Model(inputs=model.input, outputs=layer_outputs)
-
-        activations = activation_model.predict(img_tensor)
-        print(activations[-1])
-        first_layer_activation = activations[0]
-        print(first_layer_activation.shape)
-
-        layer_names = ['Convolution_1', 'Convolution_2']
-
-        cmap = plt.get_cmap('Reds')
-        cmap.set_under('white')
-
-        images_per_row = 4
-        grids = []
-        k = 0
-        for layer_name, layer_activation in zip(layer_names, activations):  # Displays the feature maps
-
-            n_features = layer_activation.shape[-1]  # Number of features in the feature map
-            size = layer_activation.shape[1]  # The feature map has shape (1, size, size, n_features).
-            print(size)
-            n_cols = n_features // images_per_row  # Tiles the activation channels in this matrix
-            display_grid = np.zeros((size * n_cols, images_per_row * size))
-
-            for col in range(n_cols):  # Tiles each filter into a big horizontal grid
-                for row in range(images_per_row):
-                    channel_image = layer_activation[0, :, :, col * images_per_row + row]
-                    # channel_image -= channel_image.mean()  # Post-processes the feature to make it visually palatable
-                    # channel_image /= channel_image.std()
-                    # channel_image *= 64
-                    # channel_image += 128
-                    # channel_image = np.clip(channel_image, 0, 255).astype('uint8')
-                    display_grid[col * size: (col + 1) * size,  # Displays the grid
-                    row * size: (row + 1) * size] = channel_image[::-1, :]  # origin 'lower' convention
-
-            grids.append(display_grid)
-
-            if plot:
-                scale = 2. / size
-                fig, (ax1, ax2) = plt.subplots(1, 2)
-                img1 = ax1.imshow(img_tensor[0, :, :, 0], cmap='plasma', origin='lower')
-                ax1.set_title(r'In-focus PSF')
-                img2 = ax2.imshow(display_grid, cmap=cmap, vmin=np.spacing(0.0))
-                ax2.set_title(r'Convolution Layer #%d Outputs' % (k + 1))
-                for ax in fig.axes:
-                    hide_axes(ax)
-                # plt.figure(figsize=(scale * display_grid.shape[1],
-                #                     scale * display_grid.shape[0]))
-                # plt.title(layer_name)
-                # plt.grid(False)
-                # # plt.imshow(mask_grid, cmap='Reds')
-                # im = display_grid
-                # plt.imshow(im, aspect='auto', cmap=cmap, vmin=np.spacing(0.0))
-            k += 1
-
-        return grids
-
-    grids = calculate_activations(img_tensor=test_PSF_readout[0:1], plot=True)
-    plt.show()
-
-
-    def compare_activations(j_act):
-
-        layer_activations = []
-        rand_coef = np.random.uniform(low=-coef_strength, high=coef_strength, size=N_act)
-        for alpha in [0.0, coef_strength]:
-
-            # Compute the in-focus and defocused PSF images for a given actuator
-            coef_zero = np.zeros(N_act)
-
-            coef_zero[j_act] = alpha * coef_strength
-            PSF, _s = PSF_actuators.compute_PSF(coef_zero)
-            PSF_foc, _s = PSF_actuators.compute_PSF(coef_zero + diversity_defocus)
-            PSF_array = np.zeros((1, pix, pix, 2))
-            PSF_array[:, :, :, 0] = PSF
-            PSF_array[:, :, :, 1] = PSF_foc
-            img_tensor = noise_model.add_readout_noise(PSF_array, RMS_READ=1./(2*SNR))
-
-            # Calculate the activations
-            activations = calculate_activations(img_tensor, True)
-            layer_activations.append(activations)
-
-        nominal_activation = layer_activations[0]
-        new_activation = layer_activations[1]
-        N_layers = len(nominal_activation)
-        layer_names = ['Convolutional #%d Output' % (i + 1) for i in range(N_layers)]
-        for k in range(N_layers):
-
-            size = nominal_activation[k].shape[1]
-            scale = 8. / size
-            plt.figure(figsize=(scale * new_activation[k].shape[1],
-                                scale * new_activation[k].shape[0]))
-            plt.grid(False)
-            # plt.imshow(mask_grid, cmap='Reds')
-            im = new_activation[k] - nominal_activation[k]
-            plt.imshow(im, aspect='auto', cmap='seismic')
-            im_max = max(-np.min(im), np.max(im))
-            plt.clim(-im_max, im_max)
-            plt.title(layer_names[k] + r' | Actuator #%d' % (j_act + 1))
-            plt.axes().xaxis.set_visible(False)
-            plt.axes().yaxis.set_visible(False)
-
-        return
-
-    compare_activations(3)
-    plt.show()
 
 
 
@@ -630,3 +641,15 @@ if __name__ == """__main__""":
         k += 1
         # nominal_grid.append(display_grid)
     plt.show()
+
+    # Noise
+    # Add some Readout Noise to the PSF images to spice things up
+    # SNR_READOUT = 750
+    SNR = 250
+    noise_model = noise.NoiseEffects()
+    train_PSF_readout = noise_model.add_readout_noise(train_PSF, RMS_READ=1./SNR)
+    test_PSF_readout = noise_model.add_readout_noise(test_PSF, RMS_READ=1./SNR)
+
+    losses = calib_actu.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
+                                                plot_val_loss=False, readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
