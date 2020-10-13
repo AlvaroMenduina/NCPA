@@ -49,7 +49,7 @@ N_WAVES = 15                         # How many wavelength channels to consider
 # Machine Learning bits
 N_train, N_test = 10000, 500        # Samples for the training of the models
 coef_strength = 0.45                # Strength of the actuator coefficients
-diversity = 0.85                    # Strength of extra diversity commands
+diversity = 1.5                    # Strength of extra diversity commands
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filers = [64, 32, 16, 8]      # How many filters per layer
 kernel_size = 3
@@ -193,7 +193,7 @@ if __name__ == """__main__""":
     # Does the number of channels we use matter?
     # Let's train several models with different number of wavelength channels
 
-    noiseSNR = np.array([500, 250, 125])
+    noiseSNR = np.array([250, 125])
     N_noise = noiseSNR.shape[0]
     mu_chans_noise = np.zeros((N_noise, N_WAVES))
     std_chans_noise = np.zeros((N_noise, N_WAVES))
@@ -230,13 +230,33 @@ if __name__ == """__main__""":
 
     colors = cm.Reds(np.linspace(0.5, 0.75, N_noise))
     plt.figure()
-    for i_noise, SNR in enumerate(noiseSNR[:2]):
+    for i_noise, SNR in enumerate(noiseSNR):
         plt.errorbar(wave_channels, y=mu_chans_noise[i_noise], yerr=std_chans_noise[i_noise],
                      fmt='o', color=colors[i_noise], label='SNR %d' % SNR)
     plt.xlabel(r'Wavelength Channels')
     plt.ylabel(r'RMS after calibration [nm]')
     plt.legend()
     plt.show()
+
+    ### Fit LS linear regression to the data
+    from scipy.optimize import curve_fit
+    i_noise = 0
+    x_data = np.arange(1, N_WAVES + 1)
+    y_data = mu_chans_noise[i_noise]
+    y_sigma = std_chans_noise[i_noise]
+
+    def linear(x_data, m, n):
+        return m * x_data + n
+
+
+    popt, pcov = curve_fit(linear, x_data, y_data, sigma=y_sigma)
+
+    plt.figure()
+    plt.errorbar(x_data, y=y_data, yerr=y_sigma,
+                 fmt='o', color=colors[i_noise], label='SNR %d' % SNR)
+    plt.plot(x_data, linear(x_data, popt[0], popt[1]))
+    plt.show()
+
 
     ### ============================================================================================================ ###
     # Are we gaining performance just from the fact that the last channel has a longer wavelength
