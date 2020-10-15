@@ -223,7 +223,8 @@ if __name__ == """__main__""":
 
         return nom_diff
 
-    ratios = [1.05, 1.10, 1.25]
+    # ratios = [1.05, 1.10, 1.25]
+    ratios = [1.25]
     markers = ['^', 'v', 'd', 'o']
     colors = cm.Reds(np.linspace(0.5, 1.0, 3))
     plt.figure()
@@ -498,12 +499,25 @@ if __name__ == """__main__""":
     plt.ylim(bottom=0)
     plt.show()
 
-
+    # ================================================================================================================ #
     # How does the RMS after calibration change with the error in anamorphic scale?
+
+    # First of all we test the "basis" performance for the nominal model and nominal test set (no anamorphic errors)
+    RMS_basis, residuals_basis = calib_zern.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
+                                                                 readout_noise=False, RMS_readout=1. / SNR)
+    RMS0 = RMS_basis[-1][-1]
+    MU0, STD0 = np.mean(RMS0), np.std(RMS0)
+    RMS_before = np.mean(RMS_basis[0][0])
+    STD_before = np.std(RMS_basis[0][0])
+
     N_ratios = 10
-    ratios = np.linspace(1.0, 1.5, N_ratios)
+    ratios_below = np.linspace(0.85, 1.0, N_ratios)[:-1]
+    ratios_above = np.linspace(1.0, 1.10, N_ratios)
+    # ratios = np.concatenate([ratios_below, ratios_above])
     MUS, STDS = [], []
-    for k, ratio in enumerate(ratios):
+    for k, ratio in enumerate(ratios_above):
+
+        print("\nRatio: %.3f" % ratio)
         zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
                                                                                              rho_obsc=RHO_OBSC, N_PIX=N_PIX,
                                                                                              radial_oversize=1.0,
@@ -517,22 +531,93 @@ if __name__ == """__main__""":
         _PSF, _coef, test_PSF_anam, test_coef_anam = calibration.generate_dataset(PSF_zernike_anam, 0, N_test,
                                                                                   coef_strength, rescale)
 
-        guess_coef_anam = calib_zern.cnn_model.predict(test_PSF_anam)
-        residual_coef_anam = test_coef_anam - guess_coef_anam
-        RMS_after = np.zeros(N_test)
-        for j in range(N_test):
-            _wavef = np.dot(PSF_zernike.model_matrix, residual_coef_anam[j])
-            RMS_after[j] = np.std(_wavef[PSF_zernike.pupil_mask])
+        # Calibrate several iterations
+        calib_anam = calibration.Calibration(PSF_model=PSF_zernike_anam)
+        # We create a Calibration model whose
+        #   (1) PSF model is the one with anamorphic errors, so that we properly update the PSF
+        #   (2) It's CNN model for calibration is the one trained in PSF images WITHOUT errors
+        calib_anam.cnn_model = calib_zern.cnn_model
+        RMS_evolution, residuals = calib_anam.calibrate_iterations(test_PSF_anam, test_coef_anam, wavelength=WAVE,
+                                                                   N_iter=N_iter, readout_noise=False, RMS_readout=1./SNR)
+        # RMS = RMS_evolution[-1][-1]
+        # MU, STD = np.mean(RMS), np.std(RMS)
+        #
+        # MUS.append(MU)
+        # STDS.append(STD)
 
-        mean_rms = np.mean(RMS_after)
-        MUS.append(mean_rms)
-        std_rms = np.std(RMS_after)
-        STDS.append(std_rms)
+        mu, std = np.zeros(N_zern), np.zeros(N_zern)
+        mu_anam, std_anam = np.zeros(N_zern), np.zeros(N_zern)
+        for k in range(N_zern):
+            coef_ = residuals_basis[:, k]
+            coef_anam = residuals[:, k]
+            mu[k] = np.mean(coef_)
+            std[k] = np.std(coef_)
+            mu_anam[k] = np.mean(coef_anam)
+            std_anam[k] = np.std(coef_anam)
+
+        delta_mu = [mu_anam[i] - mu[i] if mu[i] > 0.0 else mu[i] - mu_anam[i] for i in range(N_zern)]
+        delta_std = np.abs(std_anam - std) / 3
+        c_ = delta_std / np.max(delta_std)
+        colors = cm.Reds(c_)
+        plt.figure()
+        for i in range(N_zern):
+            # plt.errorbar(np.arange(1, N_zern + 1), y=mu, yerr=std/2, fmt='o')
+            #     plt.errorbar(np.arange(1, N_zern + 1) + 0.1, y=delta_mu, yerr=delta_std, fmt='o', c=colors)
+            plt.errorbar(i + 1, y=delta_mu[i], yerr=delta_std[i], fmt='o', c=colors[i])
+        # plt.gray()
+        plt.xticks(np.arange(1, N_zern + 1))
+        # plt.axhline(0, 0, linestyle='--', color='black')
+        plt.xlabel(r'Zernike polynomial')
+        plt.ylabel(r'Bias $|\mu_r - \mu| [\lambda]$')
+        # plt.ylim(bottom=0)
+        plt.show()
+
+
+
+        # print("\n        |           Nominal         |         Anamorphic       |")
+        # print("Zernike |      Mu +- Std (Med)      |      Mu +- Std (Med)      |")
+        # for i in range(N_zern):
+        #     c_basis = residuals_basis[:, i]
+        #     mu_basis, std_basis, median_basis = 100*np.mean(c_basis), 100*np.std(c_basis), 100*np.median(c_basis)
+        #     c_anam = residuals[:, i]
+        #     mu_anam, std_anam, median_anam = 100*np.mean(c_anam), 100*np.std(c_anam), 100*np.median(c_anam)
+        #     print("Z (%d)   |  %.1f +- %.1f (%.1f)   |   %.1f +- %.1f (%.1f)" % (i + 1, mu_basis, std_basis, median_basis,
+        #                                                                   mu_anam, std_anam, median_anam))
+
+        N_rows = 4
+        N_cols = 8
+        bins = 50
+        fig, axes = plt.subplots(N_rows, N_cols)
+        deltas = []
+        for k in range(N_rows * N_cols):
+            ax = axes.flatten()[k]
+            # we show the basis performance (the "ideal")
+            if k in ls_aberr:
+                ax.hist(residuals_basis[:, k], bins=bins, alpha=0.5, color='salmon')
+            else:
+                ax.hist(residuals_basis[:, k], bins=bins, alpha=0.5, color='lightgreen')
+            ax.hist(residuals[:, k], bins=bins, histtype='step', color='black')
+            ax.set_xlim([-0.1, 0.1])
+            ax.yaxis.set_visible(False)
+            if k // N_cols != N_rows - 1:
+                ax.xaxis.set_visible(False)
+            ax.set_title('%d' % (k + 1))
+            ax.set_xlabel('Residual [$\lambda$]')
+        plt.show()
+
 
     plt.figure()
-    plt.errorbar(x=ratios, y=MUS, yerr=STDS, fmt='o')
+    xmin = 0.825
+    xmax = 1.175
+    plt.errorbar(x=ratios_above, y=np.array(MUS), yerr=np.array(STDS), fmt='o')
+    plt.fill_between(x=[xmin, xmax], y1=np.array(RMS_before) - np.array(STD_before),
+                     y2=np.array(RMS_before) + np.array(STD_before),
+                     color='salmon', alpha=0.5)
+    plt.axhline(y=np.array(RMS_before), linestyle='--', color='red')
     plt.xlabel(r'Ratio [ ]')
-    plt.ylabel(r'RMS after calibration [$\lambda$]')
+    plt.ylabel(r'RMS after calibration [nm]')
+    plt.ylim(bottom=0)
+    plt.xlim([xmin, xmax])
     plt.show()
 
 
