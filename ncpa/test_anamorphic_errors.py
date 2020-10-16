@@ -194,6 +194,47 @@ if __name__ == """__main__""":
 
     from scipy.optimize import least_squares
 
+    N_actuators = 50
+    alpha_pc = 15
+    centers = psf.actuator_centres(N_actuators, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, radial=True)
+    N_act = len(centers[0])
+    psf.plot_actuators(centers, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    plt.show()
+
+    # Calculate the Actuator Model Matrix (Influence Functions)
+    actuator_matrix, pupil_mask, flat_actuator = psf.actuator_matrix(centres=centers, alpha_pc=alpha_pc,
+                                                                     rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+    actuator_matrices = [actuator_matrix, pupil_mask, flat_actuator]
+
+    # Create the PSF model using the Actuator Model for the wavefront
+    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
+                                            crop_pix=pix, diversity_coef=np.zeros(N_act))
+
+    def residuals_actuators(x_coef, PSF_actuator, PSF_zernike_anam):
+
+        p_nom_anam, s = PSF_zernike_anam.compute_PSF(np.zeros(N_zern))
+        fake_psf_nom, s = PSF_actuator.compute_PSF(x_coef)
+        nom_diff = (fake_psf_nom - p_nom_anam).flatten()
+
+        return nom_diff
+
+    anamorphic_ratio = 1.01
+    zernike_matrices_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                               radial_oversize=1.0, anamorphic_ratio=anamorphic_ratio)
+    zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = zernike_matrices_anam
+
+    zernike_matrices_anam = [zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam]
+    PSF_zernike_anam = psf.PointSpreadFunction(matrices=zernike_matrices_anam, N_pix=N_PIX,
+                                               crop_pix=pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
+    PSF_zernike_anam.define_diversity(defocus_zernike)
+
+    x0 = np.random.uniform(low=-0.1, high=0.1, size=N_act)
+    result = least_squares(fun=residuals_actuators, x0=x0, args=(PSF_actuators, PSF_zernike_anam),
+                           verbose=2, max_nfev=100)
+    x_coef = result.x
+
+    fake_wavef = np.dot(actuator_matrix, x_coef)
+
     def residuals_with_defocus(x_coef, PSF_zernike, PSF_zernike_anam):
 
         # Calculate the NOMINAL PSF for each model
@@ -224,7 +265,7 @@ if __name__ == """__main__""":
         return nom_diff
 
     # ratios = [1.05, 1.10, 1.25]
-    ratios = [1.25]
+    ratios = [1.05]
     markers = ['^', 'v', 'd', 'o']
     colors = cm.Reds(np.linspace(0.5, 1.0, 3))
     plt.figure()
@@ -270,67 +311,15 @@ if __name__ == """__main__""":
         ax.yaxis.set_visible(False)
     plt.show()
 
-    def residuals(x_coef, PSF_zernike, PSF_zernike_anam):
-
-        N_trials = 100
-        mean_diff = []
-        mean_fake = []
-        # for k in range(1):
-
-        rand_coef = 0.0*np.random.uniform(low=-0.15, high=0.15, size=N_zern)
-
-        # Calculate the PSF for each model
-        p, s = PSF_zernike.compute_PSF(rand_coef)
-        p_anam, s = PSF_zernike_anam.compute_PSF(rand_coef)
-        diff = p_anam - p
-        mean_diff.append(diff)
-
-        fake_psf, s = PSF_zernike.compute_PSF(rand_coef + x_coef)
-        fake_diff = fake_psf - p
-        mean_fake.append(fake_diff)
-
-        avg_diff = np.mean(np.array(mean_diff), axis=0)
-        # print(avg_diff.shape)
-        avg_fake = np.mean(np.array(mean_fake), axis=0)
-
-        # plt.figure()
-        # plt.imshow(avg_diff, cmap='RdBu')
-        # plt.colorbar()
-        #
-        # plt.figure()
-        # plt.imshow(avg_fake, cmap='RdBu')
-        # plt.colorbar()
-        # plt.show()
-
-        # the difference is what we should try to replicate with the Zernike aberrations
-        residual = diff - fake_diff
-
-        return residual.flatten()
-
-
-
-    x0 = np.random.uniform(low=-0.01, high=0.01, size=N_zern)
-    result = least_squares(fun=residuals, x0=x0, args=(PSF_zernike, PSF_zernike_anam),
-                           loss='soft_l1', verbose=2)
-    x_coef = result.x
-
-    N_ls = 100
-    ls_coefs = []
-    for i in range(N_ls):
-        # x0 = np.random.uniform(low=-0.05, high=0.05, size=N_zern)
-        x0 = np.zeros(N_zern)
-        rand_coef = np.random.uniform(low=-0.15, high=0.15, size=N_zern)
-        result = least_squares(fun=residuals, x0=x0, args=(rand_coef, PSF_zernike, PSF_zernike_anam),
-                               loss='soft_l1', verbose=2)
-        x_coef = result.x
-        ls_coefs.append(x_coef)
 
     # Show how well we match the variations with the fake aberrations
+    rand_coef = np.zeros(N_zern)
     p, s = PSF_zernike.compute_PSF(rand_coef)
     p_anam, s = PSF_zernike_anam.compute_PSF(rand_coef)
     diff = p_anam - p
 
     fake_psf, s = PSF_zernike.compute_PSF(rand_coef + x_coef)
+    # fake_psf, s = PSF_actuators.compute_PSF(x_coef)
     fake_diff = fake_psf - p
 
     fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
@@ -339,50 +328,67 @@ if __name__ == """__main__""":
     img1 = ax1.imshow(p, cmap='plasma', extent=extent, origin='lower')
     plt.colorbar(img1, ax=ax1)
     ax1.set_title(r'Nominal PSF')
+    ax1.set_xlabel(r'X [mas]')
+    ax1.set_ylabel(r'Y [mas]')
 
     # Same PSF (same aberrations) but the anamorphic error
     img2 = ax2.imshow(p_anam, cmap='plasma', extent=extent, origin='lower')
     plt.colorbar(img2, ax=ax2)
-    ax2.set_title(r'Ratio $a/b=%.2f$' % anamorphic_ratio)
+    ax2.set_title(r'Ratio $a/b=%.2f$' % r)
+    ax2.set_xlabel(r'X [mas]')
+    ax2.set_ylabel(r'Y [mas]')
 
     img3 = ax3.imshow(diff, cmap='RdBu', extent=extent, origin='lower')
     cval = max(-np.min(diff), np.max(diff))
     img3.set_clim(-cval, cval)
     plt.colorbar(img3, ax=ax3)
     ax3.set_title(r'Difference Anamorphic - Nominal')
+    ax3.set_xlabel(r'X [mas]')
+    ax3.set_ylabel(r'Y [mas]')
 
     # Now we do the result for the non-linear LS fit
     # Show the fake wavefront that matches
-    fake_wavef = np.dot(PSF_zernike.model_matrix, x_coef)
+    fake_wavef = np.dot(zernike_matrix_aux, x_coef)
     img4 = ax4.imshow(fake_wavef, cmap='jet', origin='lower', extent=[-1, 1, -1, 1])
-    ax4.set_xlim([-RHO_APER, RHO_APER])
-    ax4.set_ylim([-RHO_APER, RHO_APER])
+    cval_wave = max(-np.min(fake_wavef), np.max(fake_wavef))
+    # img4.set_clim(-cval_wave, cval_wave)
+    ax4.set_xlim([-1, 1])
+    ax4.set_ylim([-1, 1])
     plt.colorbar(img4, ax=ax4)
     ax4.set_title(r'Fake wavefront')
 
     # Now show the PSF with the aberrations + the FAKE aberrations
     img5 = ax5.imshow(fake_psf, cmap='plasma', extent=extent, origin='lower')
     plt.colorbar(img5, ax=ax5)
-    ax5.set_title(r'Nominal PSF + fake aberrations')
+    ax5.set_title(r'Nominal PSF + Fake aberrations')
+    ax5.set_xlabel(r'X [mas]')
+    ax5.set_ylabel(r'Y [mas]')
 
     # Show the difference
     img6 = ax6.imshow(fake_diff, cmap='RdBu', extent=extent, origin='lower')
-    # img6.set_clim(-cval, cval)
+    cval_fake = max(-np.min(fake_diff), np.max(fake_diff))
+    img6.set_clim(-cval_fake, cval_fake)
     plt.colorbar(img6, ax=ax6)
     ax6.set_title(r'Difference Fake - Nominal')
+    ax6.set_xlabel(r'X [mas]')
+    ax6.set_ylabel(r'Y [mas]')
 
     plt.show()
 
 
     # Show the aberrations that contributed most
     i_sort = np.argsort(np.abs(x_coef))[::-1]
-    for k in range(5):
+    fig, axes = plt.subplots(4, 8)
+    for k in range(N_zern-1):
 
         # phase_ = np.dot(PSF_zernike.model_matrix, x_coef[k])
-        plt.figure()
-        plt.imshow(PSF_zernike.model_matrix[:, :, k], cmap='jet')
+        ax = axes.flatten()[k]
+        img = ax.imshow(zernike_matrix_aux[:, :, k], cmap='jet')
+        ax.set_title("%d" % (k + 1))
+        ax.xaxis.set_visible(False)
+        ax.yaxis.set_visible(False)
 
-
+    plt.show()
 
     phase_ = np.dot(PSF_zernike.model_matrix, result.x)
 
@@ -503,6 +509,7 @@ if __name__ == """__main__""":
     # How does the RMS after calibration change with the error in anamorphic scale?
 
     # First of all we test the "basis" performance for the nominal model and nominal test set (no anamorphic errors)
+    N_iter = 5
     RMS_basis, residuals_basis = calib_zern.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
                                                                  readout_noise=False, RMS_readout=1. / SNR)
     RMS0 = RMS_basis[-1][-1]
@@ -510,12 +517,23 @@ if __name__ == """__main__""":
     RMS_before = np.mean(RMS_basis[0][0])
     STD_before = np.std(RMS_basis[0][0])
 
-    N_ratios = 10
+    def calculate_strehl(PSF_model, coeff):
+
+        N_PSF = coeff.shape[0]
+        strehl = np.zeros(N_PSF)
+        for j in range(N_PSF):
+            _p, s = PSF_model.compute_PSF(coeff[j])
+            strehl[j] = s
+
+        return strehl
+
+    N_ratios = 5
     ratios_below = np.linspace(0.85, 1.0, N_ratios)[:-1]
-    ratios_above = np.linspace(1.0, 1.10, N_ratios)
-    # ratios = np.concatenate([ratios_below, ratios_above])
+    ratios_above = np.linspace(1.0, 1.15, N_ratios)
+    ratios = np.concatenate([ratios_below, ratios_above])
+    mu_strehl, std_strehl = [], []
     MUS, STDS = [], []
-    for k, ratio in enumerate(ratios_above):
+    for k, ratio in enumerate(ratios):
 
         print("\nRatio: %.3f" % ratio)
         zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
@@ -539,54 +557,32 @@ if __name__ == """__main__""":
         calib_anam.cnn_model = calib_zern.cnn_model
         RMS_evolution, residuals = calib_anam.calibrate_iterations(test_PSF_anam, test_coef_anam, wavelength=WAVE,
                                                                    N_iter=N_iter, readout_noise=False, RMS_readout=1./SNR)
-        # RMS = RMS_evolution[-1][-1]
-        # MU, STD = np.mean(RMS), np.std(RMS)
-        #
-        # MUS.append(MU)
-        # STDS.append(STD)
 
-        mu, std = np.zeros(N_zern), np.zeros(N_zern)
-        mu_anam, std_anam = np.zeros(N_zern), np.zeros(N_zern)
-        for k in range(N_zern):
-            coef_ = residuals_basis[:, k]
-            coef_anam = residuals[:, k]
-            mu[k] = np.mean(coef_)
-            std[k] = np.std(coef_)
-            mu_anam[k] = np.mean(coef_anam)
-            std_anam[k] = np.std(coef_anam)
+        strehl_anam = calculate_strehl(PSF_zernike, residuals)
+        mu_strehl.append(np.mean(strehl_anam))
+        std_strehl.append(np.std(strehl_anam))
 
-        delta_mu = [mu_anam[i] - mu[i] if mu[i] > 0.0 else mu[i] - mu_anam[i] for i in range(N_zern)]
-        delta_std = np.abs(std_anam - std) / 3
-        c_ = delta_std / np.max(delta_std)
-        colors = cm.Reds(c_)
-        plt.figure()
-        for i in range(N_zern):
-            # plt.errorbar(np.arange(1, N_zern + 1), y=mu, yerr=std/2, fmt='o')
-            #     plt.errorbar(np.arange(1, N_zern + 1) + 0.1, y=delta_mu, yerr=delta_std, fmt='o', c=colors)
-            plt.errorbar(i + 1, y=delta_mu[i], yerr=delta_std[i], fmt='o', c=colors[i])
-        # plt.gray()
-        plt.xticks(np.arange(1, N_zern + 1))
-        # plt.axhline(0, 0, linestyle='--', color='black')
-        plt.xlabel(r'Zernike polynomial')
-        plt.ylabel(r'Bias $|\mu_r - \mu| [\lambda]$')
-        # plt.ylim(bottom=0)
-        plt.show()
+        RMS = RMS_evolution[-1][-1]
+        MU, STD = np.mean(RMS), np.std(RMS)
 
+        MUS.append(MU)
+        STDS.append(STD)
 
 
         # print("\n        |           Nominal         |         Anamorphic       |")
         # print("Zernike |      Mu +- Std (Med)      |      Mu +- Std (Med)      |")
+        # print("Ratio: %.2f" % ratio)
         # for i in range(N_zern):
         #     c_basis = residuals_basis[:, i]
         #     mu_basis, std_basis, median_basis = 100*np.mean(c_basis), 100*np.std(c_basis), 100*np.median(c_basis)
         #     c_anam = residuals[:, i]
         #     mu_anam, std_anam, median_anam = 100*np.mean(c_anam), 100*np.std(c_anam), 100*np.median(c_anam)
-        #     print("Z (%d)   |  %.1f +- %.1f (%.1f)   |   %.1f +- %.1f (%.1f)" % (i + 1, mu_basis, std_basis, median_basis,
-        #                                                                   mu_anam, std_anam, median_anam))
+        #     print("Z (%d)   |  %.1f +- %.1f" % (i + 1, mu_anam, std_anam))
 
         N_rows = 4
         N_cols = 8
-        bins = 50
+        # bins = 50
+        bins = np.linspace(-0.1, 0.1, 30, endpoint=True)
         fig, axes = plt.subplots(N_rows, N_cols)
         deltas = []
         for k in range(N_rows * N_cols):
@@ -619,5 +615,100 @@ if __name__ == """__main__""":
     plt.ylim(bottom=0)
     plt.xlim([xmin, xmax])
     plt.show()
+
+    # ================================================================================================================ #
+    #                               Robust Calibration ?
+    # ================================================================================================================ #
+
+    # We begin by putting together a training set.
+    N_ratios = 5
+    # We train only in a narrow band of ratios [0.90 - 1.10]
+    # we will test over a wider range
+    ratios_robust = np.linspace(0.90, 1.10, N_ratios)
+    train_PSF_robust, train_coef_robust = [], []
+    test_PSF_robust, test_coef_robust = [], []
+    for k, ratio in enumerate(ratios_robust):
+
+        print("\nRatio: %.3f" % ratio)
+        zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
+                                                                                             rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                                                                             radial_oversize=1.0,
+                                                                                             anamorphic_ratio=ratio)
+
+        zernike_matrices_anam = [zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam]
+        PSF_zernike_anam = psf.PointSpreadFunction(matrices=zernike_matrices_anam, N_pix=N_PIX,
+                                                   crop_pix=pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
+        PSF_zernike_anam.define_diversity(defocus_zernike)
+
+        t_ = calibration.generate_dataset(PSF_zernike_anam, 2000, N_test, coef_strength, rescale)
+        train_PSF_rob, train_coef_rob, test_PSF_rob, test_coef_rob = t_
+        train_PSF_robust.append(train_PSF_rob)
+        train_coef_robust.append(train_coef_rob)
+        test_PSF_robust.append(test_PSF_rob)
+        test_coef_robust.append(test_coef_rob)
+
+    train_PSF_robust = np.concatenate(train_PSF_robust, axis=0)
+    train_coef_robust = np.concatenate(train_coef_robust, axis=0)
+    test_PSF_robust = np.concatenate(test_PSF_robust, axis=0)
+    test_coef_robust = np.concatenate(test_coef_robust, axis=0)
+
+
+    # Train the Calibration Model on multiple examples of PSF images with different ellipticity
+    epochs = 10
+    calib_robust = calibration.Calibration(PSF_model=PSF_zernike)
+    calib_robust.create_cnn_model(layer_filters, kernel_size, name='ROBUST', activation='relu')
+    losses = calib_robust.train_calibration_model(train_PSF_robust, train_coef_robust, test_PSF_robust, test_coef_robust,
+                                                  N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                                readout_noise=False, RMS_readout=[1. / SNR], readout_copies=0)
+
+    # Put together a test set over a wider range
+    PSF_models = []
+    # Get rid of the ol test dataset that we use in the training for validation
+    test_PSF_robust, test_coef_robust = [], []
+    for k, r in enumerate(ratios):
+
+        print("\nRatio: %.3f" % r)
+        zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
+                                                                                             rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                                                                             radial_oversize=1.0,
+                                                                                             anamorphic_ratio=r)
+
+        zernike_matrices_anam = [zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam]
+        PSF_zernike_anam = psf.PointSpreadFunction(matrices=zernike_matrices_anam, N_pix=N_PIX,
+                                                   crop_pix=pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
+        PSF_zernike_anam.define_diversity(defocus_zernike)
+        PSF_models.append(PSF_zernike_anam)
+
+        _PSF, _coef, test_PSF_anam, test_coef_anam = calibration.generate_dataset(PSF_zernike_anam, 0, N_test,
+                                                                                  coef_strength, rescale)
+        test_PSF_robust.append(test_PSF_anam)
+        test_coef_robust.append(test_coef_anam)
+
+    test_PSF_robust = np.concatenate(test_PSF_robust, axis=0)
+    test_coef_robust = np.concatenate(test_coef_robust, axis=0)
+
+    # Test the performance (manually)
+    guess_coef_rob = calib_robust.cnn_model.predict(test_PSF_robust)
+    residual_coef_rob = test_coef_robust - guess_coef_rob
+
+    N_iter = 3
+    strehl_rob = []
+    for j, r in enumerate(ratios):
+
+        # Update the PSF according to each anamorphic model
+        calib_robust.PSF_model = PSF_models[j]
+        t_PSF = test_PSF_robust[j*N_test:(j+1)*N_test]
+        t_coef = test_coef_robust[j*N_test:(j+1)*N_test]
+
+        RMS_evolution, residuals = calib_robust.calibrate_iterations(t_PSF, t_coef, wavelength=WAVE,
+                                                                   N_iter=N_iter, readout_noise=False, RMS_readout=1./SNR)
+        _s = calculate_strehl(PSF_zernike, residuals)
+        strehl_rob.append(np.mean(_s))
+
+
+
+
+
+
 
 
