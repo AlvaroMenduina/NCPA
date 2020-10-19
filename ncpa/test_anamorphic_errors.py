@@ -665,7 +665,7 @@ if __name__ == """__main__""":
     PSF_models = []
     # Get rid of the ol test dataset that we use in the training for validation
     test_PSF_robust, test_coef_robust = [], []
-    for k, r in enumerate(ratios):
+    for k, r in enumerate([1.15, 1.175, 1.20, 1.25]):
 
         print("\nRatio: %.3f" % r)
         zernike_matrix_anam, pupil_mask_zernike_anam, flat_zernike_anam = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
@@ -691,9 +691,9 @@ if __name__ == """__main__""":
     guess_coef_rob = calib_robust.cnn_model.predict(test_PSF_robust)
     residual_coef_rob = test_coef_robust - guess_coef_rob
 
-    N_iter = 3
+    N_iter = 4
     strehl_rob = []
-    for j, r in enumerate(ratios):
+    for j, r in enumerate([1.15, 1.175, 1.20, 1.25]):
 
         # Update the PSF according to each anamorphic model
         calib_robust.PSF_model = PSF_models[j]

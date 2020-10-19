@@ -7,6 +7,9 @@ ________________________________________________________________________________
 Is there a basis that works better for calibration?
 Is Zernike polynomials better-suited than Actuator Commands models?
 
+Modified on October 2020
+to include the effects of actuators -> pupil mapping errors
+
 """
 
 import numpy as np
@@ -55,6 +58,7 @@ if __name__ == """__main__""":
     zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
                                                                           N_PIX=N_PIX, radial_oversize=1.1)
+    N_zern = zernike_matrix.shape[-1]
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
     PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=N_PIX,
                                           crop_pix=pix, diversity_coef=np.zeros(zernike_matrix.shape[-1]))
@@ -76,7 +80,7 @@ if __name__ == """__main__""":
     actuator_matrices = [actuator_matrix, pupil_mask, flat_actuator]
 
     # Create the PSF model using the Actuator Model for the wavefront
-    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=2*N_PIX,
+    PSF_actuators = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
                                             crop_pix=pix, diversity_coef=np.zeros(N_act))
 
     # Use Least Squares to find the actuator commands that mimic the Zernike defocus
@@ -342,6 +346,148 @@ if __name__ == """__main__""":
     print("RMS before calibration: %.4f +- %.4f rad" % (np.mean(RMS0), np.std(RMS0)))
     print("Zernike Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_zern), np.std(RMS_zern)))
     print("Actuator Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_actu), np.std(RMS_actu)))
+
+    # ================================================================================================================ #
+    #                             Impact of Actuator -> Pupil Mapping errors
+    # ================================================================================================================ #
+
+    # Motivation: the mapping between actuators and their positions at the pupil plane can be unstable
+    # In other words, when we push an actuator, we might think we are affecting an area of the pupil plane
+    # while in reality, the projected centre for that actuator might have moved a little
+
+    def actuator_random_shift(nominal_centres, delta_spacing, amplitude=0.10):
+
+        N_act = len(nominal_centres)
+
+        delta_radius = delta_spacing * amplitude
+        angle = np.random.uniform(low=0.0, high=2*np.pi)
+
+        moved_centres = []
+        for k in range(N_act):
+
+            x_nom, y_nom = nominal_centres[k]
+            dx, dy = delta_radius * np.sin(angle), delta_radius * np.cos(angle)
+
+            x_new, y_new = x_nom + dx, y_nom + dy
+            moved_centres.append([x_new, y_new])
+
+        return moved_centres, angle
+
+    shift = 0.20
+    centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1], amplitude=shift)
+    centers_rand = [centers_rand, centers[1]]
+    psf.plot_actuators(centers, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    psf.plot_actuators(centers_rand, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    plt.show()
+
+    actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc,
+                                                 rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+
+    # Create the PSF model using the Actuator Model for the wavefront
+    PSF_actuators_rand = psf.PointSpreadFunction(matrices=actuator_matrices_rand, N_pix=N_PIX,
+                                                 crop_pix=pix, diversity_coef=np.zeros(N_act))
+    PSF_actuators_rand.define_diversity(diversity_defocus)
+
+    # Compare the wavefront for the nominal actuator model, and the shifted one
+    models = [PSF_actuators, PSF_actuators_rand]
+    coef_rand = np.random.uniform(-0.15, 0.15, size=N_act)
+    wavef_nom = np.dot(PSF_actuators.model_matrix, coef_rand)
+    wavef_rand = np.dot(PSF_actuators_rand.model_matrix, coef_rand)
+    cval_rand = max(-np.min(wavef_rand), np.max(wavef_rand))
+    cval_nom = max(-np.min(wavef_nom), np.max(wavef_nom))
+    cval = max(cval_nom, cval_rand)
+
+    p_nom, s_nom = PSF_actuators.compute_PSF(coef_rand)
+    p_rand, s_rand = PSF_actuators_rand.compute_PSF(coef_rand)
+
+    fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3)
+    extent = [-1, 1, -1, 1]
+    img1 = ax1.imshow(wavef_nom, cmap='RdBu', extent=extent)
+    img1.set_clim(-cval, cval)
+    plt.colorbar(img1, ax=ax1)
+    ax1.set_xlim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax1.set_ylim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax1.set_title(r'Nominal Actuator Model [$\lambda$]')
+
+    img2 = ax2.imshow(wavef_rand, cmap='RdBu', extent=extent)
+    img2.set_clim(-cval, cval)
+    plt.colorbar(img2, ax=ax2)
+    ax2.set_xlim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax2.set_ylim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax2.set_title(r'Shift %.1f percent,  $\theta=%.1f$ deg' % (shift * 100, theta / np.pi * 180))
+
+    diff_rand = wavef_rand - wavef_nom
+    cval_diff = max(-np.min(diff_rand), np.max(diff_rand))
+    img3 = ax3.imshow(diff_rand, cmap='RdBu', extent=extent)
+    img3.set_clim(-cval_diff, cval_diff)
+    plt.colorbar(img3, ax=ax3)
+    ax3.set_xlim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax3.set_ylim([-1.1*RHO_APER, 1.1*RHO_APER])
+    ax3.set_title('Wavefront difference [$\lambda$]')
+
+    img4 = ax4.imshow(p_nom, cmap='plasma')
+    # img1.set_clim(-cval, cval)
+    plt.colorbar(img4, ax=ax4)
+    ax4.set_title('Nominal PSF')
+
+    img5 = ax5.imshow(p_rand, cmap='plasma')
+    # img1.set_clim(-cval, cval)
+    plt.colorbar(img5, ax=ax5)
+    ax5.set_title('Shifted Actuators PSF')
+
+    diff_psf = p_rand - p_nom
+    cval_psf = max(-np.min(diff_psf), np.max(diff_psf))
+    img6 = ax6.imshow(diff_psf, cmap='RdBu')
+    img6.set_clim(-cval_psf, cval_psf)
+    plt.colorbar(img6, ax=ax6)
+    ax6.set_title('PSF difference')
+
+    plt.show()
+
+    # Test the performance on PSF images with the shifted actuator model
+
+    # For that we need to forget about the Zernikes otherwise it will make our live very difficult
+
+    coef_strength_actu = coef_strength * 2
+    train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu = calibration.generate_dataset(PSF_actuators, N_train, N_test,
+                                                                                                  coef_strength_actu, rescale)
+
+    # Train a Calibration model
+    epochs = 10
+    calib_actuators = calibration.Calibration(PSF_model=PSF_actuators)
+    calib_actuators.create_cnn_model(layer_filters, kernel_size, name='NOM_ACTU', activation='relu')
+    losses = calib_actuators.train_calibration_model(train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu,
+                                                N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                                readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
+
+    guess_actu_nom = calib_actuators.cnn_model.predict(test_PSF_actu)
+    residual_nom = test_coef_actu - guess_actu_nom
+    print(np.mean(norm(test_coef_actu, axis=1)))
+    print(np.mean(norm(residual_nom, axis=1)))
+
+    N_iter = 3
+    RMS_evo_nom, residuals_nom = calib_actuators.calibrate_iterations(test_images=test_PSF_actu, test_coefs=test_coef_actu,
+                                    wavelength=WAVE, N_iter=N_iter)
+
+    # Generate a test set with the shifted model
+    _PSF, _coef, test_PSF_actu_shift, test_coef_actu_shift = calibration.generate_dataset(PSF_actuators_rand, 0, N_test,
+                                                                                          coef_strength_actu, rescale)
+
+    guess_actu_shift = calib_actuators.cnn_model.predict(test_PSF_actu_shift)
+    residual_shift = test_coef_actu_shift - guess_actu_shift
+    print(np.mean(norm(test_coef_actu_shift, axis=1)))
+    print(np.mean(norm(residual_shift, axis=1)))
+
+    calib_actuators.PSF_model = PSF_actuators_rand
+    RMS_evolution, residuals = calib_actuators.calibrate_iterations(test_images=test_PSF_actu_shift, test_coefs=test_coef_actu_shift,
+                                    wavelength=WAVE, N_iter=N_iter)
+
+
+
+
+
+
+    # ================================================================================================================ #
 
     commands = np.mean(np.abs(res_actu), axis=0)
     fig, ax = utils.plot_actuator_commands(commands=commands, centers=centers, rho_aper=RHO_APER, PIX=1024, cmap='Reds')
