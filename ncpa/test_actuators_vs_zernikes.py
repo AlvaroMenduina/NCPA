@@ -356,7 +356,7 @@ if __name__ == """__main__""":
     # In other words, when we push an actuator, we might think we are affecting an area of the pupil plane
     # while in reality, the projected centre for that actuator might have moved a little
 
-    def actuator_random_shift(nominal_centres, delta_spacing, amplitude=0.10):
+    def actuator_random_shift(nominal_centres, delta_spacing, amplitude=0.10, angle=None):
         """
         Simulate mapping errors between the actuators theoretical positions
         and their actual position in the pupil
@@ -373,7 +373,7 @@ if __name__ == """__main__""":
         N_act = len(nominal_centres)
 
         delta_radius = delta_spacing * amplitude
-        angle = np.random.uniform(low=0.0, high=2*np.pi)
+        angle = np.random.uniform(low=0.0, high=2*np.pi) if angle is None else angle
 
         moved_centres = []
         for k in range(N_act):
@@ -419,7 +419,7 @@ if __name__ == """__main__""":
         return
 
 
-    shift = 0.25
+    shift = 0.0
     centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1], amplitude=shift)
     centers_rand = [centers_rand, centers[1]]
     compare_actuators(nominal_centres=centers[0], moved_centres=centers_rand[0], shift=shift,
@@ -512,18 +512,20 @@ if __name__ == """__main__""":
                                                                                                   coef_strength_actu, rescale)
 
     # Train a Calibration model
-    epochs = 10
+    SNR = 500
+    epochs = 1
     layer_filters = [32, 16, 8]
     calib_actuators = calibration.Calibration(PSF_model=PSF_actuators)
     calib_actuators.create_cnn_model(layer_filters, kernel_size, name='NOM_ACTU', activation='relu')
     losses = calib_actuators.train_calibration_model(train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu,
-                                                N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
-                                                readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
+                                                N_loops=5, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                                readout_noise=True, RMS_readout=[1. / SNR], readout_copies=3)
 
     # Run the calibration on the nominal images for a few iterations
     N_iter = 4
     RMS_evo_nom, residuals_nom = calib_actuators.calibrate_iterations(test_images=test_PSF_actu, test_coefs=test_coef_actu,
-                                    wavelength=WAVE, N_iter=N_iter)
+                                                                      wavelength=WAVE, N_iter=N_iter,
+                                                                      readout_noise=True, RMS_readout=1. / SNR)
 
     strehl_nom = calculate_strehl(PSF_model=PSF_actuators, coeff=residuals_nom)
     mu_nom, std_nom = np.mean(strehl_nom), np.std(strehl_nom)
@@ -547,7 +549,7 @@ if __name__ == """__main__""":
         return image
 
 
-    def calibrate_iterations_shift(calib_model, PSF_model, PSF_model_shift, test_images, test_coef, N_iter):
+    def calibrate_iterations_shift(calib_model, PSF_model, PSF_model_shift, test_images, test_coef, N_iter, beta=1.0):
 
         coef0 = test_coef
         # we begin by calculating the wavefronts
@@ -588,7 +590,7 @@ if __name__ == """__main__""":
 
                 # This is the KEY part. We apply a wavefront correction with the "SHIFTED" actuator model
                 # so the correction will be slightly wrong, compared to what we think are doing
-                bad_correction = np.dot(PSF_model_shift.model_matrix, guess[k])
+                bad_correction = beta * np.dot(PSF_model_shift.model_matrix, guess[k])
                 bad_residual = wavef_before - bad_correction
                 new_wave[k] = bad_residual
                 RMS_after[k] = np.std(bad_residual[PSF_model.pupil_mask])
@@ -622,11 +624,12 @@ if __name__ == """__main__""":
                 # using the residual aberrations
                 new_PSF[k, :, :, 0] = compute_PSF_phase(PSF_model, phase=bad_residual)
                 new_PSF[k, :, :, 1] = compute_PSF_phase(PSF_model, phase=bad_residual, diversity=True)
+
                 #
                 # # Update the WF as well
                 # wave0[k] = bad_residual
 
-            test_images = new_PSF
+            test_images = calib_actuators.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR)
             s = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
             strehl_evolution.append(s)
             RMS_evolution.append(RMS_after)
@@ -637,13 +640,17 @@ if __name__ == """__main__""":
         return wavefronts, RMS_evolution, strehl_evolution
 
 
+    test_PSF_actu_noisy = calib_actuators.noise_effects.add_readout_noise(test_PSF_actu, RMS_READ=1/SNR)
     N_iter = 4
     wavefronts, RMS_ev, f_strehl = calibrate_iterations_shift(calib_actuators, PSF_actuators, PSF_actuators_rand,
-                                                    test_PSF_actu, test_coef_actu, N_iter=N_iter)
+                                                              test_PSF_actu_noisy, test_coef_actu, N_iter=N_iter)
     plt.show()
     m = [np.mean(x) for x in RMS_ev]
 
+
+
     # Run a loop over the Shift Errors
+    N_iter = 4
     N_shift = 15
     shifts = np.linspace(0.0, 0.5, N_shift, endpoint=True)
     strehls = np.zeros((N_shift, N_iter + 1))
@@ -667,8 +674,9 @@ if __name__ == """__main__""":
         PSF_actuators_rand.define_diversity(diversity_defocus)
 
         # Run the calibration using that correction model
+        test_PSF_actu_noisy = calib_actuators.noise_effects.add_readout_noise(test_PSF_actu, RMS_READ=1 / SNR)
         results = calibrate_iterations_shift(calib_actuators, PSF_actuators, PSF_actuators_rand,
-                                             test_PSF_actu, test_coef_actu, N_iter=N_iter)
+                                             test_PSF_actu_noisy, test_coef_actu, N_iter=N_iter, beta=1.0)
         final_strehl = results[-1]
         strehls[k] = final_strehl
 
@@ -681,7 +689,7 @@ if __name__ == """__main__""":
         plt.scatter((N_iter + 1) * [shifts[k]], strehls[k], color=colors, s=10)
     plt.show()
 
-    colors = cm.Blues(np.linspace(0.25, 1.0, (N_iter + 1)))
+    colors = cm.Reds(np.linspace(0.25, 1.0, (N_iter + 1)))
     plt.figure()
     for k in range(N_iter + 1):
         plt.plot(shifts, strehls[:, k], color=colors[k], label='%d' % (k))
@@ -694,6 +702,166 @@ if __name__ == """__main__""":
     plt.xlim([0, 0.5])
     plt.grid(True)
     plt.show()
+
+    def average_shift_error(coef_rand, shift, PSF_model, beta):
+
+        wave_base = np.dot(PSF_model.model_matrix, coef_rand)
+        N_models = 25
+        angles = np.linspace(0, 2 * np.pi, N_models, endpoint=False)
+
+        rms_res = np.zeros(N_models)
+        for k in range(N_models):
+            # Create a model with the mapping error
+            centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1],
+                                                        amplitude=shift,
+                                                        angle=angles[k])
+            centers_rand = [centers_rand, centers[1]]
+            actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc, rho_aper=RHO_APER,
+                                                         rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+            PSF_actuators_rand = psf.PointSpreadFunction(matrices=actuator_matrices_rand, N_pix=N_PIX, crop_pix=pix,
+                                                         diversity_coef=np.zeros(N_act))
+            PSF_actuators_rand.define_diversity(diversity_defocus)
+            wave_shift = np.dot(PSF_actuators_rand.model_matrix, c_rand)
+            residual_wf = wave_base - beta * wave_shift
+            rms_res[k] = np.std(residual_wf[PSF_model.pupil_mask])
+
+        return np.mean(rms_res)
+
+
+    c_rand = np.random.uniform(-1, 1, N_act)
+    r = average_shift_error(coef_rand=c_rand, shift=0.10, PSF_model=PSF_actuators, beta=0.75)
+    bs = np.linspace(0, 1, 10)
+    rs = [average_shift_error(coef_rand=c_rand, shift=0.10, PSF_model=PSF_actuators, beta=b) for b in bs]
+    plt.figure()
+    plt.plot(bs, rs)
+    plt.show()
+
+
+
+    # Check what's the average impact of misalignments
+
+    wave_base = np.dot(PSF_actuators.model_matrix, c_rand)
+    N_models = 25
+    shift = 0.10
+    shift_models = []
+    shfif_diffs = np.zeros((N_models, N_PIX, N_PIX))
+    angles = np.linspace(0, 2*np.pi, N_models)
+    for k in range(N_models):
+
+        # Create a model with the mapping error
+        centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1], amplitude=shift,
+                                                    angle=angles[k])
+        centers_rand = [centers_rand, centers[1]]
+        actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+        PSF_actuators_rand = psf.PointSpreadFunction(matrices=actuator_matrices_rand, N_pix=N_PIX, crop_pix=pix, diversity_coef=np.zeros(N_act))
+        PSF_actuators_rand.define_diversity(diversity_defocus)
+        wave_shift = np.dot(PSF_actuators_rand.model_matrix, c_rand)
+        shfif_diffs[k] = wave_base - wave_shift
+
+        shift_models.append(PSF_actuators_rand.model_matrix)
+
+    mean_diff = np.mean(shfif_diffs, axis=0)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+
+    img1 = ax1.imshow(wave_base, cmap='RdBu')
+    plt.colorbar(img1, ax=ax1)
+
+    img2 = ax2.imshow(mean_diff, cmap='RdBu', extent=extent)
+    cc = np.array(centers[0])
+    ax2.scatter(cc[:, 0], cc[:, 1], s=5, color='black')
+    plt.colorbar(img2, ax=ax2)
+    plt.show()
+
+    fig, axes = plt.subplots(5, 5)
+    cval = max(-np.min(shfif_diffs), np.max(shfif_diffs))
+    for i in range(5):
+        for j in range(5):
+            ax = axes[i][j]
+            k = 5 * i + j
+            print(k)
+            img = ax.imshow(shfif_diffs[k], cmap='RdBu', extent=extent)
+            # ax.scatter(cc[:, 0], cc[:, 1], s=2, color='black')
+            img.set_clim(-cval, cval)
+            ax.set_xlim([-RHO_APER, RHO_APER])
+            ax.set_ylim([-RHO_APER, RHO_APER])
+            ax.xaxis.set_visible(False)
+            ax.yaxis.set_visible(False)
+
+    plt.show()
+
+    # Could you train a model to predict the misalignments???
+
+    # Get the predicted coefficients for the nominal calibration
+    train_coef_predict = calib_actuators.cnn_model.predict(train_PSF_actu)
+
+    N_models = 50
+    N = 100
+    shift = 0.50
+    angles = np.linspace(0, np.pi, N_models, endpoint=False)
+    train_diff_PSF = []
+    for k in range(N_models):
+
+        # Create a model with the mapping error
+        centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1], amplitude=shift,
+                                                    angle=angles[k])
+        centers_rand = [centers_rand, centers[1]]
+        actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+        PSF_actuators_rand = psf.PointSpreadFunction(matrices=actuator_matrices_rand, N_pix=N_PIX, crop_pix=pix, diversity_coef=np.zeros(N_act))
+        PSF_actuators_rand.define_diversity(diversity_defocus)
+
+        diff_PSF = np.zeros((N, pix, pix, 2))
+        for k in range(N):
+
+            if k % 500 == 0:
+                print(k)
+
+            wavef_before = np.dot(PSF_actuators.model_matrix, train_coef_actu[k])
+
+            # This is the KEY part. We apply a wavefront correction with the "SHIFTED" actuator model
+            # so the correction will be slightly wrong, compared to what we think are doing
+            bad_correction = np.dot(PSF_actuators_rand.model_matrix, train_coef_predict[k])
+            bad_residual = wavef_before - bad_correction
+            new_PSF_nom = compute_PSF_phase(PSF_actuators, phase=bad_residual)
+            new_PSF_foc = compute_PSF_phase(PSF_actuators, phase=bad_residual, diversity=True)
+
+            diff_PSF[k, :, :, 0] = train_PSF_actu[k, :, :, 0] - new_PSF_nom
+            diff_PSF[k, :, :, 1] = train_PSF_actu[k, :, :, 1] - new_PSF_foc
+        train_diff_PSF.append(diff_PSF)
+
+    train_diff_PSF = np.concatenate(train_diff_PSF, axis=0)
+    # for k in range(N_models):
+    #     plt.figure()
+    #     plt.imshow(train_diff_PSF[k * N, :, :, 0] - train_diff_PSF[0, :, :, 0], cmap='RdBu')
+    #     plt.colorbar()
+
+    train_angles = np.zeros(N * N_models)
+    for k in range(N_models):
+        train_angles[k*N: (k + 1)*N] = angles[k]
+
+    # Train a model to predict the angles
+
+    # Create the PSF model using the Actuator Model for the wavefront
+    PSF_useless = psf.PointSpreadFunction(matrices=actuator_matrices, N_pix=N_PIX,
+                                            crop_pix=pix, diversity_coef=np.zeros(N_act))
+    PSF_useless.N_coef = 1
+
+    epochs = 10
+    layer_filters = [32, 16, 8]
+    calib_angles = calibration.Calibration(PSF_model=PSF_useless)
+    calib_angles.create_cnn_model(layer_filters, kernel_size, name='ANGLES', activation='relu')
+    losses = calib_angles.train_calibration_model(train_diff_PSF[:N * (N_models - 1)], train_angles[:N * (N_models - 1)],
+                                                  train_diff_PSF[N * (N_models - 1):],
+                                                  train_angles[N * (N_models - 1):],
+                                                  N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
+                                                  readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
+
+    p_angles = calib_angles.cnn_model.predict(train_diff_PSF[N * (N_models - 1):])
+
+
+
+
+
 
 
 
