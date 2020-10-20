@@ -15,6 +15,7 @@ to include the effects of actuators -> pupil mapping errors
 import numpy as np
 from numpy.linalg import norm
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import seaborn as sns
 
 import psf
@@ -356,6 +357,18 @@ if __name__ == """__main__""":
     # while in reality, the projected centre for that actuator might have moved a little
 
     def actuator_random_shift(nominal_centres, delta_spacing, amplitude=0.10):
+        """
+        Simulate mapping errors between the actuators theoretical positions
+        and their actual position in the pupil
+
+        We randomly shift the whole grid by "amplitude" a fraction of the actuator spacing
+        The angle is chosen randomly, between 0 and 2 pi
+
+        :param nominal_centres:
+        :param delta_spacing:
+        :param amplitude:
+        :return:
+        """
 
         N_act = len(nominal_centres)
 
@@ -366,18 +379,53 @@ if __name__ == """__main__""":
         for k in range(N_act):
 
             x_nom, y_nom = nominal_centres[k]
-            dx, dy = delta_radius * np.sin(angle), delta_radius * np.cos(angle)
+            dx, dy = delta_radius * np.cos(angle), delta_radius * np.sin(angle)
 
             x_new, y_new = x_nom + dx, y_nom + dy
             moved_centres.append([x_new, y_new])
 
         return moved_centres, angle
 
-    shift = 0.20
+    def compare_actuators(nominal_centres, moved_centres, shift, rho_aper, rho_obsc):
+        """
+        Plot the two sets of actuator centres [nominal] and [shifted] to see
+        how they compare
+
+        :param nominal_centres:
+        :param moved_centres:
+        :param shift:
+        :param rho_aper:
+        :param rho_obsc:
+        :return:
+        """
+
+        N_act = len(nominal_centres)
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        circ1 = Circle((0, 0), rho_aper, linestyle='--', fill=None)
+        circ2 = Circle((0, 0), rho_obsc, linestyle='--', fill=None)
+        ax.add_patch(circ1)
+        ax.add_patch(circ2)
+        s = 10
+        for nom_c in nominal_centres:
+            ax.scatter(nom_c[0], nom_c[1], s=s, color='red')
+        for mov_c in moved_centres:
+            ax.scatter(mov_c[0], mov_c[1], s=s, color='salmon')
+        ax.set_aspect('equal')
+        plt.xlim([-1.25 * rho_aper, 1.25 * rho_aper])
+        plt.ylim([-1.25 * rho_aper, 1.25 * rho_aper])
+        plt.title('%d actuators | Shift: %.1f percent' % (N_act, 100*shift))
+
+        return
+
+
+    shift = 0.25
     centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1], amplitude=shift)
     centers_rand = [centers_rand, centers[1]]
-    psf.plot_actuators(centers, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
-    psf.plot_actuators(centers_rand, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    compare_actuators(nominal_centres=centers[0], moved_centres=centers_rand[0], shift=shift,
+                      rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    # psf.plot_actuators(centers, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
+    # psf.plot_actuators(centers_rand, rho_aper=RHO_APER, rho_obsc=RHO_OBSC)
     plt.show()
 
     actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc,
@@ -448,39 +496,237 @@ if __name__ == """__main__""":
 
     # For that we need to forget about the Zernikes otherwise it will make our live very difficult
 
+    def calculate_strehl(PSF_model, coeff):
+
+        N_PSF = coeff.shape[0]
+        strehl = np.zeros(N_PSF)
+        for j in range(N_PSF):
+            _p, s = PSF_model.compute_PSF(coeff[j])
+            strehl[j] = s
+
+        return strehl
+
+    # Generate a training set based on the nominal PSF model (actuators)
     coef_strength_actu = coef_strength * 2
     train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu = calibration.generate_dataset(PSF_actuators, N_train, N_test,
                                                                                                   coef_strength_actu, rescale)
 
     # Train a Calibration model
     epochs = 10
+    layer_filters = [32, 16, 8]
     calib_actuators = calibration.Calibration(PSF_model=PSF_actuators)
     calib_actuators.create_cnn_model(layer_filters, kernel_size, name='NOM_ACTU', activation='relu')
     losses = calib_actuators.train_calibration_model(train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu,
                                                 N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                                 readout_noise=False, RMS_readout=[1. / SNR], readout_copies=3)
 
-    guess_actu_nom = calib_actuators.cnn_model.predict(test_PSF_actu)
-    residual_nom = test_coef_actu - guess_actu_nom
-    print(np.mean(norm(test_coef_actu, axis=1)))
-    print(np.mean(norm(residual_nom, axis=1)))
-
-    N_iter = 3
+    # Run the calibration on the nominal images for a few iterations
+    N_iter = 4
     RMS_evo_nom, residuals_nom = calib_actuators.calibrate_iterations(test_images=test_PSF_actu, test_coefs=test_coef_actu,
                                     wavelength=WAVE, N_iter=N_iter)
+
+    strehl_nom = calculate_strehl(PSF_model=PSF_actuators, coeff=residuals_nom)
+    mu_nom, std_nom = np.mean(strehl_nom), np.std(strehl_nom)
+
+    # Now we see what happens when the correction we apply is slightly off
+
+    from numpy.fft import fftshift, fft2
+
+    def compute_PSF_phase(PSF_model, phase, diversity=False):
+
+        phase0 = phase
+        if diversity:
+            phase0 += PSF_model.diversity_phase
+
+        pupil_function = PSF_model.pupil_mask * np.exp(1j * 2 * np.pi * phase0)
+        image = (np.abs(fftshift(fft2(pupil_function)))) ** 2
+        image /= PSF_model.PEAK
+
+        image = image[PSF_model.minPix:PSF_model.maxPix, PSF_model.minPix:PSF_model.maxPix]
+
+        return image
+
+
+    def calibrate_iterations_shift(calib_model, PSF_model, PSF_model_shift, test_images, test_coef, N_iter):
+
+        coef0 = test_coef
+        # we begin by calculating the wavefronts
+        RMS0 = np.zeros(N_test)
+        wave0 = np.zeros((N_test, N_PIX, N_PIX))
+        for k in range(N_test):
+            wave0[k] = np.dot(PSF_model.model_matrix, coef0[k])
+            RMS0[k] = np.std(wave0[k][PSF_model.pupil_mask])
+
+        wavefronts = np.zeros((N_iter + 1, N_test, N_PIX, N_PIX))
+        wavefronts[0] = wave0
+
+        s0 = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
+        strehl_evolution = [s0]
+        RMS_evolution = [RMS0]
+
+        fig, axes = plt.subplots(N_iter, 3)
+
+        for j in range(N_iter):
+
+            rbefore = np.std(wave0[0][PSF_model.pupil_mask])
+            ax1 = axes[j][0]
+            img1 = ax1.imshow(wave0[0], cmap='RdBu', extent=extent)
+            plt.colorbar(img1, ax=ax1)
+            ax1.set_title(r'Wavefront Before | RMS: %.3f $\lambda$' % rbefore)
+            ax1.set_ylabel(r'Iteration #%d' % (j + 1))
+
+            print("\nIteration #%d" % (j + 1))
+            # (1) We begin by predicting the aberrations.
+            guess = calib_model.cnn_model.predict(test_images)
+
+            # (2) The residual wavefront is given by: the nominal WF we had, minus the "shifted" correction
+            new_PSF = np.zeros((N_test, pix, pix, 2))
+            new_wave = np.zeros((N_test, N_PIX, N_PIX))
+            RMS_after = np.zeros(N_test)
+            for k in range(N_test):
+                wavef_before = wave0[k]
+
+                # This is the KEY part. We apply a wavefront correction with the "SHIFTED" actuator model
+                # so the correction will be slightly wrong, compared to what we think are doing
+                bad_correction = np.dot(PSF_model_shift.model_matrix, guess[k])
+                bad_residual = wavef_before - bad_correction
+                new_wave[k] = bad_residual
+                RMS_after[k] = np.std(bad_residual[PSF_model.pupil_mask])
+
+                if k == 0:
+                    ax2 = axes[j][1]
+                    img2 = ax2.imshow(bad_correction, cmap='RdBu', extent=extent)
+                    plt.colorbar(img2, ax=ax2)
+                    ax2.set_title(r'Correction #%d' % (j+1))
+                    cval_corr = max(-np.min(bad_correction), np.max(bad_correction))
+                    cval_wave = max(-np.min(wave0[0]), np.max(wave0[0]))
+                    cval = max(cval_corr, cval_wave)
+
+                    rafter = np.std(bad_residual[PSF_model.pupil_mask])
+                    ax3 = axes[j][2]
+                    img3 = ax3.imshow(bad_residual, cmap='RdBu', extent=extent)
+                    plt.colorbar(img3, ax=ax3)
+                    ax3.set_title(r'Residual Wavefront %.3f $\lambda$' % rafter)
+
+                    img1.set_clim(-cval, cval)
+                    img2.set_clim(-cval, cval)
+                    img3.set_clim(-cval, cval)
+
+                    for ax in axes[j]:
+                        ax.xaxis.set_visible(False)
+                        ax.yaxis.set_visible(False)
+                        ax.set_xlim([-RHO_APER, RHO_APER])
+                        ax.set_ylim([-RHO_APER, RHO_APER])
+
+                # Update the PSF images directly with the PHASE
+                # using the residual aberrations
+                new_PSF[k, :, :, 0] = compute_PSF_phase(PSF_model, phase=bad_residual)
+                new_PSF[k, :, :, 1] = compute_PSF_phase(PSF_model, phase=bad_residual, diversity=True)
+                #
+                # # Update the WF as well
+                # wave0[k] = bad_residual
+
+            test_images = new_PSF
+            s = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
+            strehl_evolution.append(s)
+            RMS_evolution.append(RMS_after)
+            wave0 = new_wave
+            wavefronts[j + 1] = new_wave
+
+
+        return wavefronts, RMS_evolution, strehl_evolution
+
+
+    N_iter = 4
+    wavefronts, RMS_ev, f_strehl = calibrate_iterations_shift(calib_actuators, PSF_actuators, PSF_actuators_rand,
+                                                    test_PSF_actu, test_coef_actu, N_iter=N_iter)
+    plt.show()
+    m = [np.mean(x) for x in RMS_ev]
+
+    # Run a loop over the Shift Errors
+    N_shift = 15
+    shifts = np.linspace(0.0, 0.5, N_shift, endpoint=True)
+    strehls = np.zeros((N_shift, N_iter + 1))
+
+    import matplotlib.cm as cm
+
+    plt.figure()
+    for k in range(N_shift):
+
+        # Create a model with the mapping error
+        centers_rand, theta = actuator_random_shift(nominal_centres=centers[0], delta_spacing=centers[1],
+                                                    amplitude=shifts[k])
+        centers_rand = [centers_rand, centers[1]]
+
+        actuator_matrices_rand = psf.actuator_matrix(centres=centers_rand, alpha_pc=alpha_pc,
+                                                     rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX)
+
+        # Create the PSF model using the Actuator Model for the wavefront
+        PSF_actuators_rand = psf.PointSpreadFunction(matrices=actuator_matrices_rand, N_pix=N_PIX,
+                                                     crop_pix=pix, diversity_coef=np.zeros(N_act))
+        PSF_actuators_rand.define_diversity(diversity_defocus)
+
+        # Run the calibration using that correction model
+        results = calibrate_iterations_shift(calib_actuators, PSF_actuators, PSF_actuators_rand,
+                                             test_PSF_actu, test_coef_actu, N_iter=N_iter)
+        final_strehl = results[-1]
+        strehls[k] = final_strehl
+
+    plt.close('all')
+
+
+    plt.figure()
+    for k in range(N_shift):
+        # plot the Strehls
+        plt.scatter((N_iter + 1) * [shifts[k]], strehls[k], color=colors, s=10)
+    plt.show()
+
+    colors = cm.Blues(np.linspace(0.25, 1.0, (N_iter + 1)))
+    plt.figure()
+    for k in range(N_iter + 1):
+        plt.plot(shifts, strehls[:, k], color=colors[k], label='%d' % (k))
+        plt.scatter(shifts, strehls[:, k], color=colors[k], s=15)
+    plt.legend(title='Iteration')
+    plt.ylabel(r'Strehl ratio [ ]')
+    plt.xlabel(r'Mapping error $\epsilon / \Delta$ [ ]')
+    plt.ylim(bottom=0)
+    plt.yticks(np.arange(0.0, 1.1, 0.1))
+    plt.xlim([0, 0.5])
+    plt.grid(True)
+    plt.show()
+
+
+
+
+
+
+    # Another iteration
+
+
+
+    # res_nom = test_coef_actu - guess_actu_nom
+    # print(np.mean(norm(test_coef_actu, axis=1)))
+    # print(np.mean(norm(res_nom, axis=1)))
 
     # Generate a test set with the shifted model
     _PSF, _coef, test_PSF_actu_shift, test_coef_actu_shift = calibration.generate_dataset(PSF_actuators_rand, 0, N_test,
                                                                                           coef_strength_actu, rescale)
 
     guess_actu_shift = calib_actuators.cnn_model.predict(test_PSF_actu_shift)
-    residual_shift = test_coef_actu_shift - guess_actu_shift
+    res_shift = test_coef_actu_shift - guess_actu_shift
     print(np.mean(norm(test_coef_actu_shift, axis=1)))
-    print(np.mean(norm(residual_shift, axis=1)))
+    print(np.mean(norm(res_shift, axis=1)))
 
+    # Substitute the PSF model of the Calibration model so that it can update the PSF images correctly
     calib_actuators.PSF_model = PSF_actuators_rand
-    RMS_evolution, residuals = calib_actuators.calibrate_iterations(test_images=test_PSF_actu_shift, test_coefs=test_coef_actu_shift,
-                                    wavelength=WAVE, N_iter=N_iter)
+    # Calibrate the aberrations with the CNN trained on the NOMINAL model, but testing on the SHIFTED PSF images
+    RMS_evolution, residuals_shift = calib_actuators.calibrate_iterations(test_images=test_PSF_actu_shift,
+                                                                          test_coefs=test_coef_actu_shift,
+                                                                          wavelength=WAVE, N_iter=N_iter)
+
+    # Calculate the Strehl ratio that we would get for the nominal PSF model, for those coefficients
+    strehl_shift = calculate_strehl(PSF_model=PSF_actuators, coeff=residuals_shift)
+    mu_shift, std_shift = np.mean(strehl_shift), np.std(strehl_shift)
 
 
 
