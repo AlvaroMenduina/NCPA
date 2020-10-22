@@ -41,8 +41,8 @@ WAVE = 1.5                          # microns | reference wavelength
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
-N_levels = 8                        # Number of Zernike radial levels levels
-coef_strength = 0.2                # Strength of Zernike aberrations
+N_levels = 9                        # Number of Zernike radial levels levels
+coef_strength = 0.18                # Strength of Zernike aberrations
 diversity = 1.0                     # Strength of the Defocus diversity
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filters = [64, 32, 16]      # How many filters per layer
@@ -106,49 +106,49 @@ if __name__ == """__main__""":
     # plt.show()
 
     # [4x4]
-    train_PSF4 = downsample(train_PSF, spax0=SPAX2, new_spax=4)
-    test_PSF4 = downsample(test_PSF, spax0=SPAX2, new_spax=4)
-
-    pix4 = int(pix * SPAX2 / 4)
-    input_shape4 = (pix4, pix4, 2)
-    # Initialize Convolutional Neural Network model for calibration
-    calib_model4 = calibration.create_cnn_model(layer_filters, kernel_size, input_shape4,
-                                                N_classes=N_zern, name='4MAS', activation='relu')
-
-    # Train the calibration model
-    train_history = calib_model4.fit(x=train_PSF4, y=train_coef, validation_data=(test_PSF4, test_coef),
-                                     epochs=10, batch_size=32, shuffle=True, verbose=1)
-
-    guess_coef4 = calib_model4.predict(test_PSF4)
-    residual_coef4 = test_coef - guess_coef4
-    norm_before = np.mean(norm(test_coef, axis=1))
-    norm_after4 = np.mean(norm(residual_coef4, axis=1))
-    print("\nPerformance:")
-    print("Average Norm Coefficients")
-    print("Before: %.2f" % norm_before)
-    print("After : %.2f" % norm_after4)
-
-    # [10x10]
-    train_PSF10 = downsample(train_PSF, spax0=SPAX2, new_spax=10)
-    test_PSF10 = downsample(test_PSF, spax0=SPAX2, new_spax=10)
-
-    pix10 = int(pix * SPAX2 / 10)
-    input_shape10 = (pix10, pix10, 2)
-    # Initialize Convolutional Neural Network model for calibration
-    calib_model10 = calibration.create_cnn_model(layer_filters, kernel_size, input_shape10,
-                                                N_classes=N_zern, name='10MAS', activation='relu')
-
-    train_history = calib_model10.fit(x=train_PSF10, y=train_coef, validation_data=(test_PSF10, test_coef),
-                                     epochs=10, batch_size=32, shuffle=True, verbose=1)
-
-    guess_coef10 = calib_model10.predict(test_PSF10)
-    residual_coef10 = test_coef - guess_coef10
-    norm_before = np.mean(norm(test_coef, axis=1))
-    norm_after10 = np.mean(norm(residual_coef10, axis=1))
-    print("\nPerformance:")
-    print("Average Norm Coefficients")
-    print("Before: %.2f" % norm_before)
-    print("After : %.2f" % norm_after10)
+    # train_PSF4 = downsample(train_PSF, spax0=SPAX2, new_spax=4)
+    # test_PSF4 = downsample(test_PSF, spax0=SPAX2, new_spax=4)
+    #
+    # pix4 = int(pix * SPAX2 / 4)
+    # input_shape4 = (pix4, pix4, 2)
+    # # Initialize Convolutional Neural Network model for calibration
+    # calib_model4 = calibration.create_cnn_model(layer_filters, kernel_size, input_shape4,
+    #                                             N_classes=N_zern, name='4MAS', activation='relu')
+    #
+    # # Train the calibration model
+    # train_history = calib_model4.fit(x=train_PSF4, y=train_coef, validation_data=(test_PSF4, test_coef),
+    #                                  epochs=10, batch_size=32, shuffle=True, verbose=1)
+    #
+    # guess_coef4 = calib_model4.predict(test_PSF4)
+    # residual_coef4 = test_coef - guess_coef4
+    # norm_before = np.mean(norm(test_coef, axis=1))
+    # norm_after4 = np.mean(norm(residual_coef4, axis=1))
+    # print("\nPerformance:")
+    # print("Average Norm Coefficients")
+    # print("Before: %.2f" % norm_before)
+    # print("After : %.2f" % norm_after4)
+    #
+    # # [10x10]
+    # train_PSF10 = downsample(train_PSF, spax0=SPAX2, new_spax=10)
+    # test_PSF10 = downsample(test_PSF, spax0=SPAX2, new_spax=10)
+    #
+    # pix10 = int(pix * SPAX2 / 10)
+    # input_shape10 = (pix10, pix10, 2)
+    # # Initialize Convolutional Neural Network model for calibration
+    # calib_model10 = calibration.create_cnn_model(layer_filters, kernel_size, input_shape10,
+    #                                             N_classes=N_zern, name='10MAS', activation='relu')
+    #
+    # train_history = calib_model10.fit(x=train_PSF10, y=train_coef, validation_data=(test_PSF10, test_coef),
+    #                                  epochs=10, batch_size=32, shuffle=True, verbose=1)
+    #
+    # guess_coef10 = calib_model10.predict(test_PSF10)
+    # residual_coef10 = test_coef - guess_coef10
+    # norm_before = np.mean(norm(test_coef, axis=1))
+    # norm_after10 = np.mean(norm(residual_coef10, axis=1))
+    # print("\nPerformance:")
+    # print("Average Norm Coefficients")
+    # print("Before: %.2f" % norm_before)
+    # print("After : %.2f" % norm_after10)
 
     # [20x20]
     train_PSF20 = downsample(train_PSF, spax0=SPAX2, new_spax=20)
@@ -218,10 +218,10 @@ if __name__ == """__main__""":
         return PSF_evolution, residuals, strehls
 
     N_iter = 3
-    PSF_evolution4, residuals4, strehls4 = iterate_calibrations(calib_model=calib_model4, test_images=test_PSF,
-                                                                test_coef=test_coef, spaxel=4.0, N_iter=N_iter)
-    PSF_evolution10, residuals10, strehls10 = iterate_calibrations(calib_model=calib_model10, test_images=test_PSF,
-                                                                test_coef=test_coef, spaxel=10.0, N_iter=N_iter)
+    # PSF_evolution4, residuals4, strehls4 = iterate_calibrations(calib_model=calib_model4, test_images=test_PSF,
+    #                                                             test_coef=test_coef, spaxel=4.0, N_iter=N_iter)
+    # PSF_evolution10, residuals10, strehls10 = iterate_calibrations(calib_model=calib_model10, test_images=test_PSF,
+    #                                                             test_coef=test_coef, spaxel=10.0, N_iter=N_iter)
     PSF_evolution20, residuals20, strehls20 = iterate_calibrations(calib_model=calib_model20, test_images=test_PSF,
                                                                 test_coef=test_coef, spaxel=20.0, N_iter=N_iter)
     print("\nStrehl ratios")
@@ -519,9 +519,10 @@ if __name__ == """__main__""":
     plt.show()
 
     # Impact of HOW MANY pixels we shift
-    max_pixels = [1, 2, 3]
+    max_pixels = [1, 2, 3, 4, 5]
     strehls_chan = []
     mus_chan, stds_chan = [], []
+    N_channels = []
     for shift_p in max_pixels:
         print("\nShifting Images by %d / 10 pixel" % (shift_p))
 
@@ -530,11 +531,36 @@ if __name__ == """__main__""":
         print(shift_pixels)
         # (2) Now we shift them in both (+, -) directions
         roll_model20.train_roll_model(shift_pixels=shift_pixels)
+        N_channels.append(roll_model20.input_shape[-1])
         PSF_evo, residuals_roll_20, strehls_roll_20 = roll_model20.iterate_calibrations(shift_pixels=shift_pixels, N_iter=N_iter)
         strehls_chan.append(strehls_roll_20[-1])
         mus_chan.append(np.mean(strehls_roll_20[-1]))
         stds_chan.append(np.std(strehls_roll_20[-1]))
 
+
+    plt.figure()
+    plt.errorbar(pixels[0], y=mus_p[0], yerr=stds_p[0], fmt='o', label=r'Nominal', color='red')
+    plt.errorbar(pixels[1:] - 0.05, y=mus_p[1:], yerr=stds_p[1:], fmt='o', label=r'$+ f$', color='navy')
+    plt.errorbar(pixels[1:] + 0.05, y=mus_pm[1:], yerr=stds_pm[1:], fmt='o', label=r'$\pm f$', color='lightgreen')
+    # plt.plot(pixels, mus_p)
+    plt.legend(loc=4)
+    plt.ylim(bottom=0)
+    plt.ylabel(r'Strehl [ ]')
+    plt.xlabel(r'Shift [$1/10$] of 20 mas spaxel')
+    plt.show()
+
+
+    N_pixels = len(max_pixels)
+    bins_strehl = np.linspace(0, 1, 25)
+    fig, axes = plt.subplots(N_pixels, 1)
+    for k in range(N_pixels):
+        ax = axes[k]
+        ax.hist(strehls_chan[k], bins=bins_strehl, alpha=0.5, color=blues[0], label='0')
+        # ax.hist(strehls_pm[k], histtype='step', bins=bins_strehl, alpha=0.95, color='black', label='0')
+        ax.yaxis.set_visible(False)
+        if k != N_pixels - 1:
+            ax.xaxis.set_ticks([])
+    plt.show()
 
 
 
