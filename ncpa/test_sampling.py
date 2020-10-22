@@ -324,53 +324,11 @@ if __name__ == """__main__""":
     # What happens if you move the PSF by a fraction of the NEW SPAXEL before downsampling
     # [20x20]
 
-
-    N_rows = 4
-    N_cols = 8
-    xmax = 0.25
-    bins = np.linspace(-xmax, xmax, 25)
-    fig, axes = plt.subplots(N_rows, N_cols)
-    deltas = []
-    for k in range(N_rows * N_cols):
-
-        ax = axes.flatten()[k]
-        ax.hist(test_coef[:, k], bins=bins, alpha=0.5, color='lightgreen', label='Initial')
-        # ax.hist(residual_coef4[:, k], bins=bins, histtype='step', color='blue', label='4 mas')
-        ax.hist(guess_coef20[:, k], bins=bins, histtype='step', color='black', label='1 channel')
-        ax.hist(guess_coef20_rolled[:, k], bins=bins, histtype='step', color='red', label='Rolled')
-        ax.set_xlim([-xmax, xmax])
-        ax.yaxis.set_visible(False)
-        if k // N_cols != N_rows - 1:
-            ax.xaxis.set_visible(False)
-        ax.set_title('%d' % (k + 1))
-        ax.set_xlabel('Coefficient [$\lambda$]')
-        if k == 0:
-            ax.legend(loc=3, facecolor='white', framealpha=1)
-    plt.show()
-
-    strehls = [strehls4, strehls20, strehls20_r]
-    fig, axes = plt.subplots(1, 3)
-    for j in range(3):
-        s_data = strehls[j]
-        ax = axes[j]
-
-        ax.hist(s_data[0], bins=bins, alpha=0.5, color=colors[j][0], label='0')
-        for k in np.arange(1, N_iter + 1):
-            ax.hist(s_data[k], bins=bins, histtype='step', color=colors[j][k], label='%d' % (k))
-
-        ax.legend(title='Iteration', loc=2)
-        ax.set_title('%d mas spaxels' % (spaxels[j]))
-        ax.set_xlabel(r'Strehl ratio [ ]')
-        ax.set_xlim([0, 1])
-
-    plt.show()
-
-
     class Model(object):
 
         def __init__(self, spax, training_data):
 
-            self.spax = spax
+            self.spax = spax        # spax is the scale we'll use to downsample (typically 20 mas)
 
             # Training data comes sampled at 2 mas spaxels
             self.train_PSF, self.train_coef, self.test_PSF, self.test_coef = training_data
@@ -379,30 +337,51 @@ if __name__ == """__main__""":
             # ML parameters
             self.layer_filters = layer_filters
             self.kernel_size = kernel_size
-            self.pix_spax = int(
-                pix * SPAX2 / spax)  # How many pixels we have in the downsampled images at this spaxel scale
+            self.pix_spax = int(pix * SPAX2 / spax)  # Pixels we have in the downsampled images at this spaxel scale
 
             return
 
         def roll_dataset(self, images, shift_pixels):
+            """
+            Get the PSF images (in 2.0 mas scale) shift them by N pixels (2.0 mas ones) and then downsample
+
+            Concatenate the resulting images into a single datacube with more than 2 channels
+
+            :param images: PSF images sampled at 2.0 mas pixels
+            :param shift_pixels: list containing how many 2.0 mas pixels to move the arrays before downsampling
+            :return:
+            """
 
             # add the nominal channel
             new_images = [downsample(images, spax0=SPAX2, new_spax=self.spax)]
             # now add the shifted
             for axis in [1, 2]:
                 for pixels in shift_pixels:
+                    # First we shift the arrays along either X or Y axis, by some pixels
                     shifted = np.roll(images, shift=pixels, axis=axis)
+                    # Now we downsampled those 2.0 mas images into the new scale (typically 20 mas)
                     downed = downsample(shifted, spax0=SPAX2, new_spax=self.spax)
                     new_images.append(downed)
-
+            # combine all the channels
             new_images = np.concatenate(new_images, axis=-1)
             return new_images
 
         def train_roll_model(self, shift_pixels, train_epochs=10):
+            """
+            Training a calibration model on the shifted + downsampled images
+
+            This avoids having to combine the images to increase the resolution, by treating them as separate channels
+            and letting the CNN model deal with them
+
+            :param shift_pixels:
+            :param train_epochs:
+            :return:
+            """
 
             # Transform the nominal 2.0 mas training data into the "shifted pixels" version at the nominal "Spax"
             train_PSF_rolled = self.roll_dataset(self.train_PSF, shift_pixels=shift_pixels)
             test_PSF_rolled = self.roll_dataset(self.test_PSF, shift_pixels=shift_pixels)
+            # read how many channels we have in total
             N_channels = train_PSF_rolled.shape[-1]
 
             self.input_shape = (self.pix_spax, self.pix_spax, N_channels)
@@ -466,20 +445,97 @@ if __name__ == """__main__""":
 
 
     roll_model20 = Model(spax=20, training_data=[train_PSF, train_coef, test_PSF, test_coef])
+    N_iter = 3
+    shift_pix = [-1, 1]
+    roll_model20.train_roll_model(shift_pixels=shift_pix)
+
+    # compare the predictions between the nominal 20 mas model, and the shifted
+    test_PSF20_r = roll_model20.roll_dataset(test_PSF, shift_pixels=shift_pix)
+    guess_coef20_r = roll_model20.calib_model_rolled.predict(test_PSF20_r)
+
+    k_zern = 1
+    xmin = np.min(test_coef[:, k_zern])
+    x = np.linspace(xmin, -xmin, 10)
+    plt.figure()
+    plt.scatter(test_coef[:, k_zern], test_coef[:, k_zern] - guess_coef20[:, k_zern] , s=5, color='blue')
+    plt.scatter(test_coef[:, k_zern], test_coef[:, k_zern] - guess_coef20_r[:, k_zern], s=5, color='red')
+    # plt.plot(x, x, linestyle='--', color='black')
+    plt.show()
+
+    residual_coef20 = test_coef - guess_coef20
+
+    # Impact of HOW MANY pixels we shift
     pixels = [0, 1, 2, 3, 4, 5]
-    mus_p, stds = [np.mean(strehls20)], [np.std(strehls20)]
+    s20 = strehls20[-1]
+    strehls_p, strehls_pm = [s20], [s20]
+    mus_p, stds_p = [np.mean(s20)], [np.std(s20)]
+    mus_pm, stds_pm = [np.mean(s20)], [np.std(s20)]
+
     for shift_p in pixels[1:]:
-        # shift_pix = [-1, 1]
+        print("\nShifting Images by %d / 10 pixel" % (shift_p))
+
+        # (1) First we just shift them in the (+) direction
         shift_pix = [shift_p]
         roll_model20.train_roll_model(shift_pixels=shift_pix)
-        PSF_evo, residuals_roll_20, strehls_roll_20 = roll_model20.iterate_calibrations(shift_pixels=shift_pix, N_iter=3)
+        PSF_evo, residuals_roll_20, strehls_roll_20 = roll_model20.iterate_calibrations(shift_pixels=shift_pix, N_iter=N_iter)
+        strehls_p.append(strehls_roll_20[-1])
         mus_p.append(np.mean(strehls_roll_20[-1]))
-        stds.append(np.std(strehls_roll_20[-1]))
+        stds_p.append(np.std(strehls_roll_20[-1]))
+
+        # (2) Now we shift them in both (+, -) directions
+        roll_model20.train_roll_model(shift_pixels=[-shift_p, shift_p])
+        PSF_evo, residuals_roll_20, strehls_roll_20 = roll_model20.iterate_calibrations(shift_pixels=[-shift_p, shift_p], N_iter=N_iter)
+        strehls_pm.append(strehls_roll_20[-1])
+        mus_pm.append(np.mean(strehls_roll_20[-1]))
+        stds_pm.append(np.std(strehls_roll_20[-1]))
+
+    pixels = np.array(pixels)
+    plt.figure()
+    plt.errorbar(pixels[0], y=mus_p[0], yerr=stds_p[0], fmt='o', label=r'Nominal', color='red')
+    plt.errorbar(pixels[1:] - 0.05, y=mus_p[1:], yerr=stds_p[1:], fmt='o', label=r'$+ f$', color='navy')
+    plt.errorbar(pixels[1:] + 0.05, y=mus_pm[1:], yerr=stds_pm[1:], fmt='o', label=r'$\pm f$', color='lightgreen')
+    # plt.plot(pixels, mus_p)
+    plt.legend(loc=4)
+    plt.ylim(bottom=0)
+    plt.ylabel(r'Strehl [ ]')
+    plt.xlabel(r'Shift [$1/10$] of 20 mas spaxel')
+    plt.show()
 
     plt.figure()
-    plt.plot(pixels, mus_pm)
-    plt.plot(pixels, mus_p)
+    for s in strehls_pm[1:]:
+        plt.hist(s, histtype='step')
     plt.show()
+
+    N_pixels = pixels.shape[0]
+    bins_strehl = np.linspace(0, 1, 25)
+    fig, axes = plt.subplots(N_pixels, 1)
+    for k in range(N_pixels):
+        ax = axes[k]
+        ax.hist(strehls_p[k], bins=bins_strehl, alpha=0.5, color=blues[0], label='0')
+        ax.hist(strehls_pm[k], histtype='step', bins=bins_strehl, alpha=0.95, color='black', label='0')
+        ax.yaxis.set_visible(False)
+        if k != N_pixels - 1:
+            ax.xaxis.set_ticks([])
+    plt.show()
+
+    # Impact of HOW MANY pixels we shift
+    max_pixels = [1, 2, 3]
+    strehls_chan = []
+    mus_chan, stds_chan = [], []
+    for shift_p in max_pixels:
+        print("\nShifting Images by %d / 10 pixel" % (shift_p))
+
+        shift_pixels = np.arange(-shift_p, shift_p + 1)
+        shift_pixels = np.delete(shift_pixels, obj=shift_p)
+        print(shift_pixels)
+        # (2) Now we shift them in both (+, -) directions
+        roll_model20.train_roll_model(shift_pixels=shift_pixels)
+        PSF_evo, residuals_roll_20, strehls_roll_20 = roll_model20.iterate_calibrations(shift_pixels=shift_pixels, N_iter=N_iter)
+        strehls_chan.append(strehls_roll_20[-1])
+        mus_chan.append(np.mean(strehls_roll_20[-1]))
+        stds_chan.append(np.std(strehls_roll_20[-1]))
+
+
 
 
 
