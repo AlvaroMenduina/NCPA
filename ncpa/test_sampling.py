@@ -41,11 +41,12 @@ WAVE = 1.5                          # microns | reference wavelength
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
-N_levels = 9                        # Number of Zernike radial levels levels
-coef_strength = 0.18                # Strength of Zernike aberrations
+N_levels = 8                        # Number of Zernike radial levels levels
+coef_strength = 0.2                # Strength of Zernike aberrations
 diversity = 1.0                     # Strength of the Defocus diversity
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
-layer_filters = [64, 32, 16]      # How many filters per layer
+# layer_filters = [64, 32, 16]      # How many filters per layer
+layer_filters = [128, 64, 32]      # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
 SNR = 500                           # SNR for the Readout Noise
@@ -240,7 +241,8 @@ if __name__ == """__main__""":
     colors = [reds, blues, greens]
     bins = np.linspace(0, 1.0, 20)
 
-    strehls = [strehls4, strehls10, strehls20]
+    # strehls = [strehls4, strehls10, strehls20]
+    strehls = [strehls20]
     fig, axes = plt.subplots(1, 3)
     for j in range(3):
         s_data = strehls[j]
@@ -465,7 +467,7 @@ if __name__ == """__main__""":
     residual_coef20 = test_coef - guess_coef20
 
     # Impact of HOW MANY pixels we shift
-    pixels = [0, 1, 2, 3, 4, 5]
+    pixels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     s20 = strehls20[-1]
     strehls_p, strehls_pm = [s20], [s20]
     mus_p, stds_p = [np.mean(s20)], [np.std(s20)]
@@ -491,32 +493,34 @@ if __name__ == """__main__""":
 
     pixels = np.array(pixels)
     plt.figure()
-    plt.errorbar(pixels[0], y=mus_p[0], yerr=stds_p[0], fmt='o', label=r'Nominal', color='red')
-    plt.errorbar(pixels[1:] - 0.05, y=mus_p[1:], yerr=stds_p[1:], fmt='o', label=r'$+ f$', color='navy')
-    plt.errorbar(pixels[1:] + 0.05, y=mus_pm[1:], yerr=stds_pm[1:], fmt='o', label=r'$\pm f$', color='lightgreen')
+    plt.errorbar(pixels[0], y=mus_p[0], yerr=stds_p[0], fmt='o', label=r'Nominal', color='red', capsize=5)
+    plt.errorbar(pixels[1:] - 0.075, y=mus_p[1:], yerr=stds_p[1:], fmt='o', label=r'$+ f$', color='navy', capsize=5)
+    plt.errorbar(pixels[1:] + 0.075, y=mus_pm[1:], yerr=stds_pm[1:], fmt='o', label=r'$\pm f$', color='lightgreen', capsize=5)
     # plt.plot(pixels, mus_p)
     plt.legend(loc=4)
-    plt.ylim(bottom=0)
+    plt.ylim(top=1)
     plt.ylabel(r'Strehl [ ]')
     plt.xlabel(r'Shift [$1/10$] of 20 mas spaxel')
+    plt.grid(True)
+    plt.xticks(pixels)
     plt.show()
-
-    plt.figure()
-    for s in strehls_pm[1:]:
-        plt.hist(s, histtype='step')
-    plt.show()
-
-    N_pixels = pixels.shape[0]
-    bins_strehl = np.linspace(0, 1, 25)
-    fig, axes = plt.subplots(N_pixels, 1)
-    for k in range(N_pixels):
-        ax = axes[k]
-        ax.hist(strehls_p[k], bins=bins_strehl, alpha=0.5, color=blues[0], label='0')
-        ax.hist(strehls_pm[k], histtype='step', bins=bins_strehl, alpha=0.95, color='black', label='0')
-        ax.yaxis.set_visible(False)
-        if k != N_pixels - 1:
-            ax.xaxis.set_ticks([])
-    plt.show()
+    #
+    # plt.figure()
+    # for s in strehls_pm[1:]:
+    #     plt.hist(s, histtype='step')
+    # plt.show()
+    #
+    # N_pixels = pixels.shape[0]
+    # bins_strehl = np.linspace(0, 1, 25)
+    # fig, axes = plt.subplots(N_pixels, 1)
+    # for k in range(N_pixels):
+    #     ax = axes[k]
+    #     ax.hist(strehls_p[k], bins=bins_strehl, alpha=0.5, color=blues[0], label='0')
+    #     ax.hist(strehls_pm[k], histtype='step', bins=bins_strehl, alpha=0.95, color='black', label='0')
+    #     ax.yaxis.set_visible(False)
+    #     if k != N_pixels - 1:
+    #         ax.xaxis.set_ticks([])
+    # plt.show()
 
     # Impact of HOW MANY pixels we shift
     max_pixels = [1, 2, 3, 4, 5]
