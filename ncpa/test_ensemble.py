@@ -44,8 +44,8 @@ alpha_pc = 10                       # Height [percent] at the neighbour actuator
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
-coef_strength = 0.30                # Strength of the actuator coefficients
-diversity = 0.55                    # Strength of extra diversity commands
+coef_strength = 0.40                # Strength of the actuator coefficients
+diversity = 0.65                    # Strength of extra diversity commands
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filters = [64, 32, 16, 8]      # How many filters per layer
 kernel_size = 3
@@ -91,7 +91,6 @@ if __name__ == """__main__""":
 
     # Let us begin with a baseline design. One calibration model with No Dropout or anything fancy
 
-    SNR = 250
 
     # Generate training and test datasets (clean PSF images)
     train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_actuators, N_train, N_test,
@@ -113,9 +112,12 @@ if __name__ == """__main__""":
     #                             Ensemble Approach | Multiple Calibration Models
     # ================================================================================================================ #
 
+    SNR = 150
+    readout_copies = 5
     N_ensemble = 5
+    layer_filters_ensemb = [[64, 32, 16, 8], [64, 32, 16], [64, 32], [32, 16], [16, 8]]
     ensemb_calib = calibration.CalibrationEnsemble(PSF_model=PSF_actuators)
-    ensemb_calib.generate_ensemble_models(N_models=N_ensemble, layer_filters=layer_filters, kernel_size=kernel_size,
+    ensemb_calib.generate_ensemble_models(N_models=N_ensemble, layer_filters=layer_filters_ensemb, kernel_size=kernel_size,
                                           name='ENSEMBLE', activation='relu')
     ensemb_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
                                            N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
@@ -124,7 +126,8 @@ if __name__ == """__main__""":
     # Let's see what happens to the performance as a function of the Number of ensemble models we average across
     mus_ens, sts_ens = [], []
     print("\nTesting Ensemble Models")
-    for how_many in np.arange(1, N_ensemble + 1):
+    # for how_many in np.arange(1, N_ensemble + 1):
+    for how_many in [1, N_ensemble + 1]:
         print("\nHow many models to use: ", how_many)
         _RMS, _res = ensemb_calib.calibrate_iterations_ensemble(how_many, test_PSF, test_coef, wavelength=WAVE,
                                                                 N_iter=N_iter, readout_noise=True, RMS_readout=1./SNR)
@@ -155,34 +158,53 @@ if __name__ == """__main__""":
     # Quick way to model "Bayesian Neural Networks" and get access to uncertainties in the predictions
 
     # Dropout Calibration Model ||
+    readout_copies = 3
+    SNR = 250
     drop_calib = calibration.Calibration(PSF_model=PSF_actuators)
-    drop_calib.create_cnn_model(layer_filters, kernel_size, name='DROPOUT', activation='relu', dropout=0.15)
+    drop_calib.create_cnn_model(layer_filters, kernel_size, name='DROPOUT', activation='relu', dropout=0.25)
     losses = drop_calib.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
                                                 N_loops, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
                                                 readout_noise=True, RMS_readout=[1. / SNR], readout_copies=readout_copies)
 
     # Run iterations with Dropout. At each iteration, we average across the Posterior of the predictions
+    N_iter = 5
     RMS_evo_drop, _drop_resid = drop_calib.calibrate_iterations(test_PSF, test_coef, wavelength=WAVE, N_iter=N_iter,
                                                                 readout_noise=True, RMS_readout=1./SNR,
                                                                 dropout=True, N_samples_drop=500)
-
-    # Compare the performance between the Nominal Model and the one with Dropout
+    #
+    # # Compare the performance between the Nominal Model and the one with Dropout
     calib.plot_RMS_evolution(RMS_evolution)
     drop_calib.plot_RMS_evolution(RMS_evo_drop)
     plt.show()
 
-    noisy_test_PSF = drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
+    # noisy_test_PSF = drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
     _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
 
     nom_pred = calib.cnn_model.predict(noisy_test_PSF)
-
+    bins = np.linspace(-coef_strength, coef_strength, 50)
     for k in range(5):
         plt.figure()
-        plt.hist(_drop_results[:, 0, k], histtype='step', label='Dropout Posterior')
+        plt.hist(_drop_results[:, 0, k], bins=bins, histtype='step', label='Dropout Posterior')
+        std_k = np.std(_drop_results[:, :, k], axis=0)
+        print(np.mean(std_k))
         plt.axvline(nom_pred[0, k], linestyle='--', color='blue', label='Nominal Model')
         plt.axvline(test_coef[0, k], color='black', label='Ground Truth')
         plt.legend()
     plt.show()
+
+    # check what has more bias: the nominal model, or the dropout model
+    biases_nom = np.zeros(N_act)
+    biases_drop = np.zeros(N_act)
+    for k in range(N_act):
+
+        bias_nom = np.abs(test_coef[:, k] - nom_pred[0, k])
+        biases_nom[k] = np.mean(bias_nom)
+
+        mu_drop = np.mean(_drop_results[:, :, k], axis=0)
+        bias_drop = np.abs(test_coef[:, k] - mu_drop)
+        biases_drop[k] = np.mean(bias_drop)
+
+
 
     residual_nom = test_coef - nom_pred
     std_nom = np.std(residual_nom, axis=0)
@@ -200,7 +222,7 @@ if __name__ == """__main__""":
 
     N_ens_drop = 5
     ensemb_drop_calib = calibration.CalibrationEnsemble(PSF_model=PSF_actuators)
-    ensemb_drop_calib.generate_ensemble_models(N_models=N_ens_drop, layer_filters=layer_filters, kernel_size=kernel_size,
+    ensemb_drop_calib.generate_ensemble_models(N_models=N_ens_drop, layer_filters=[layer_filters for k in range(N_ens_drop)], kernel_size=kernel_size,
                                                name='ENSEMBLE_DROPOUT', activation='relu', drop_out=0.10)
     ensemb_drop_calib.train_ensemble_models(train_PSF, train_coef, test_PSF, test_coef,
                                            N_iter, epochs_loop, verbose=1, batch_size_keras=32, plot_val_loss=False,
@@ -220,15 +242,36 @@ if __name__ == """__main__""":
     print("[Dropout] %d Models | RMS after: %.2f +- %.2f nm" % (N_ens_drop,mu_ens_drop, std_ens_drop))
 
     # # Check whether the predictions vary across the models in the list
-    # noisy_test_PSF = ensemb_drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
-    # k = 0
-    # plt.figure()
-    # for _model in ensemb_drop_calib.ensemble_models:
-    #     drop_calib.cnn_model = _model
-    #     _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
-    #     plt.hist(_drop_results[:, 0, k], histtype='step', label=_model.name)
-    # plt.legend()
-    # plt.show()
+    noisy_test_PSF = ensemb_drop_calib.noise_effects.add_readout_noise(test_PSF, RMS_READ=1./SNR)
+    k = 1
+    hists = []
+    plt.figure()
+    for _model in ensemb_drop_calib.ensemble_models:
+        drop_calib.cnn_model = _model
+        _drop_results, mean_drop, uncert_drop = drop_calib.predict_with_uncertainty(noisy_test_PSF, N_samples=500)
+        x = _drop_results[:, 0, k]
+        h = np.histogram(x, bins=bins)
+        hists.append(h[0])
+        plt.hist(x, bins=bins, histtype='step', label=_model.name)
+    plt.axvline(test_coef[0, k], color='black', label='Ground Truth')
+    plt.legend()
+    plt.show()
+
+    from scipy.stats import binned_statistic
+    x = _drop_results[:, 0, k]
+    binx = binned_statistic(x, x, bins=bins)
+
+    digitized = np.digitize(x, bins)
+
+    hs = np.array(hists)
+    pdf = np.prod(hs, axis=0)
+    peak = np.max(pdf)
+    pdf = pdf / peak
+
+
+
+
+
 
 
 

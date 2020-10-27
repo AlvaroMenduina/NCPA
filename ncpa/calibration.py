@@ -644,7 +644,7 @@ class CalibrationEnsemble(Calibration):
         self.ensemble_models = []
         for k in range(N_models):
             new_name = name + '_%d' % (k + 1)
-            self.create_cnn_model(layer_filters, kernel_size, new_name, activation, drop_out)
+            self.create_cnn_model(layer_filters[k], kernel_size, new_name, activation, drop_out)
             self.ensemble_models.append(self.cnn_model)
         del self.cnn_model
 
