@@ -302,7 +302,7 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu', dropout=None):
+    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu', dropout=None, anamorphic=False):
         """
         Creates a CNN model for NCPA calibration
 
@@ -326,7 +326,10 @@ class Calibration(object):
             N_waves = 1
 
         pix = self.PSF_model.crop_pix
-        input_shape = (pix, pix, 2 * N_waves,)        # Multiple Wavelength Channels
+        if anamorphic is False:
+            input_shape = (pix, pix, 2 * N_waves,)        # Multiple Wavelength Channels
+        else:
+            input_shape = (pix//2, pix, 2 * N_waves,)
         model = Sequential()
         model.name = name
         model.add(Conv2D(layer_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
