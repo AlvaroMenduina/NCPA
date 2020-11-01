@@ -69,6 +69,193 @@ if __name__ == """__main__""":
 
     epochs = 10
 
+    from keras.backend import clear_session
+    from keras.utils.layer_utils import count_params
+
+    calib_zern = calibration.Calibration(PSF_model=PSF_zernike)
+    layer = np.array([4, 8, 16, 32])
+    N_layers = layer.shape[0]
+    perf_sigm = np.zeros((N_layers, N_layers))
+    param_sigm = np.zeros((N_layers, N_layers))
+    for i in range(N_layers):
+        for j in range(N_layers):
+            layer_filters = [layer[i], layer[j]]
+
+            calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='sigmoid')
+            trainable_count = count_params(calib_zern.cnn_model.trainable_weights) / 1000
+            param_sigm[i, j] = trainable_count           # How many K parameters
+            losses = calib_zern.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                        N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
+                                                        plot_val_loss=False, readout_noise=False,
+                                                        RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+            # test_PSF_noise = calib_zern.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
+            guess_coef = calib_zern.cnn_model.predict(test_PSF)
+            residual_coef = test_coef - guess_coef
+            norm_res = np.mean(norm(residual_coef, axis=1))
+            perf_sigm[i, j] = norm_res
+            # ?? Delete the models?
+            del calib_zern.cnn_model
+            clear_session()
+
+    # Limits for the extent
+    x_start = 0
+    x_end = N_layers
+    y_start = 0
+    y_end = N_layers
+    size = N_layers
+
+    jump_x = (x_end - x_start) / (2.0 * size)
+    jump_y = (y_end - y_start) / (2.0 * size)
+    x_positions = np.linspace(start=x_start, stop=x_end, num=size, endpoint=False)
+    y_positions = np.linspace(start=y_start, stop=y_end, num=size, endpoint=False)
+    ticks = np.linspace(0.5, N_layers - 0.5, N_layers)
+
+    plt.figure()
+    plt.imshow(perf_sigm, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    plt.colorbar()
+    plt.xticks(ticks=ticks, labels=layer)
+    plt.yticks(ticks=ticks, labels=layer)
+    plt.xlabel('Conv2')
+    plt.ylabel('Conv1')
+    plt.title(r'Norm Residual Coefficients')
+
+    for y_index, y in enumerate(y_positions):
+        for x_index, x in enumerate(x_positions):
+            label = param_tanh[y_index, x_index]
+            if label / 1000 < 1.0:      # Hundreds of Thousands
+                s = "%dK" % label
+            elif label / 1000 > 1.0:    # Millions
+                s = "%.1fM" % (label / 1000)
+
+            text_x = x + jump_x
+            text_y = y + jump_y
+            plt.text(text_x, text_y, s, color='black', ha='center', va='center')
+
+    plt.show()
+
+    # ================================================================================================================ #
+    # # Show a comparison between a model with 2 layers [Conv1, Conv2] and a model with 3 layers [32, Conv1
+    #
+    # results = [perf, perf_32, perf_64]
+    # params = [param, param_32, param_64]
+    #
+    results = [perf_relu, perf_tanh]
+    params = [param_relu, param_tanh]
+    minc = np.min([np.min(x) for x in results])
+    maxc = np.max([np.max(x) for x in results])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+
+    img1 = ax1.imshow(perf_relu, cmap='Blues', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    img1.set_clim(minc, maxc)
+    plt.colorbar(img1, ax=ax1, orientation='horizontal')
+    # ax1.set_title(r'Architecture [Conv1, Conv2, FC]')
+    ax1.set_title(r'Architecture [Conv1, Conv2, FC] | ReLu')
+
+    img2 = ax2.imshow(perf_tanh, cmap='Blues', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    img2.set_clim(minc, maxc)
+    plt.colorbar(img2, ax=ax2, orientation='horizontal')
+    # ax2.set_title(r'Architecture [Conv0(32), Conv1, Conv2, FC]')
+    ax2.set_title(r'Architecture [Conv0(32), Conv1, Conv2, FC] | Tanh')
+
+    # img3 = ax3.imshow(perf_sigm, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    # img3.set_clim(minc, maxc)
+    # plt.colorbar(img3, ax=ax3, orientation='horizontal')
+    # ax3.set_title(r'Architecture [Conv0(64), Conv1, Conv2, FC]')
+
+    for ax, data in zip([ax1, ax2], [param_relu, param_tanh]):
+        ax.set_xlabel('Conv2 [Filters]')
+        ax.set_ylabel('Conv1 [Filters]')
+
+        ax.set_xticks(ticks=ticks)
+        ax.set_xticklabels(labels=layer)
+        ax.set_yticks(ticks=ticks)
+        ax.set_yticklabels(labels=layer)
+
+        for y_index, y in enumerate(y_positions):
+            for x_index, x in enumerate(x_positions):
+                label = data[y_index, x_index]
+                if label / 1000 < 1.0:      # Hundreds of Thousands
+                    s = "%dK" % label
+                elif label / 1000 > 1.0:    # Millions
+                    s = "%.1fM" % (label / 1000)
+
+                text_x = x + jump_x
+                text_y = y + jump_y
+                ax.text(text_x, text_y, s, color='black', ha='center', va='center')
+
+    plt.show()
+    # ================================================================================================================ #
+    # Impact of FULLY-CONNECTED layers
+
+    calib_dense = calibration.Calibration(PSF_model=PSF_zernike)
+    dense_layers = np.array([1, 2, 3, 4])
+    N_dense = dense_layers.shape[0]
+    cnn_layers = [8, 4]
+    # N_cnn = len(cnn_layers)
+    perf_dense = np.zeros((N_dense))
+    param_dense = np.zeros((N_dense))
+
+    for j in range(N_dense):
+        layer_filters = cnn_layers
+        calib_dense.create_cnn_model(layer_filters, kernel_size, N_dense=dense_layers[j], name='DENSE',
+                                     activation='relu', dense_acti='tanh')
+        trainable_count = count_params(calib_dense.cnn_model.trainable_weights) / 1000
+        param_dense[j] = trainable_count           # How many K parameters
+        losses = calib_dense.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                    N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
+                                                    plot_val_loss=False, readout_noise=False,
+                                                    RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+        # test_PSF_noise = calib_dense.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
+        guess_coef = calib_dense.cnn_model.predict(test_PSF)
+        residual_coef = test_coef - guess_coef
+        norm_res = np.mean(norm(residual_coef, axis=1))
+        perf_dense[j] = norm_res
+        # ?? Delete the models?
+        del calib_dense.cnn_model
+        clear_session()
+
+    for i in range(N_cnn):
+        plt.plot(dense_layers, perf_dense[i])
+    plt.show()
+
+
+    # ================================================================================================================ #
+    # Now with Noise
+
+    SNR = 250
+
+    calib_noisy = calibration.Calibration(PSF_model=PSF_zernike)
+    layer = np.array([4, 8, 16])
+    N_layers = layer.shape[0]
+    perf_noisy = np.zeros((N_layers, N_layers))
+    param_noisy = np.zeros((N_layers, N_layers))
+    for i in range(N_layers):
+        for j in range(N_layers):
+            layer_filters = [layer[i], layer[j]]
+
+            calib_noisy.create_cnn_model(layer_filters, kernel_size, name='NOISE', activation='relu')
+            trainable_count = count_params(calib_noisy.cnn_model.trainable_weights) / 1000
+            param_noisy[i, j] = trainable_count           # How many K parameters
+            losses = calib_noisy.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                        N_loops=3, epochs_loop=3, verbose=1, batch_size_keras=32,
+                                                        plot_val_loss=False, readout_noise=True,
+                                                        RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+            test_PSF_noise = calib_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
+            guess_coef = calib_noisy.cnn_model.predict(test_PSF_noise)
+            residual_coef = test_coef - guess_coef
+            norm_res = np.mean(norm(residual_coef, axis=1))
+            perf_noisy[i, j] = norm_res
+            # ?? Delete the models?
+            del calib_noisy.cnn_model
+            clear_session()
+
+
+    ### Old stuff
+
     # First we see whether the number of filters matters, for a constant number of layers
     layers = [[8, 4],
               [16, 8],
@@ -126,116 +313,3 @@ if __name__ == """__main__""":
         print(layer_filters)
         print(norm_residuals[k])
         print(mean_stds[k])
-
-    from keras.backend import clear_session
-    from keras.utils.layer_utils import count_params
-
-    calib_zern = calibration.Calibration(PSF_model=PSF_zernike)
-    layer = np.array([4, 8, 16, 32])
-    N_layers = layer.shape[0]
-    perf_64 = np.zeros((N_layers, N_layers))
-    param_64 = np.zeros((N_layers, N_layers))
-    for i in range(N_layers):
-        for j in range(N_layers):
-            layer_filters = [32, layer[i], layer[j]]
-
-            calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='relu')
-            trainable_count = count_params(calib_zern.cnn_model.trainable_weights) / 1000
-            param_32[i, j] = trainable_count           # How many K parameters
-            losses = calib_zern.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
-                                                        N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
-                                                        plot_val_loss=False, readout_noise=False,
-                                                        RMS_readout=[1. / SNR], readout_copies=readout_copies)
-
-            # test_PSF_noise = calib_zern.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
-            guess_coef = calib_zern.cnn_model.predict(test_PSF)
-            residual_coef = test_coef - guess_coef
-            norm_res = np.mean(norm(residual_coef, axis=1))
-            perf_32[i, j] = norm_res
-            # ?? Delete the models?
-            del calib_zern.cnn_model
-            clear_session()
-
-    # Limits for the extent
-    x_start = 0
-    x_end = N_layers
-    y_start = 0
-    y_end = N_layers
-    size = N_layers
-
-    jump_x = (x_end - x_start) / (2.0 * size)
-    jump_y = (y_end - y_start) / (2.0 * size)
-    x_positions = np.linspace(start=x_start, stop=x_end, num=size, endpoint=False)
-    y_positions = np.linspace(start=y_start, stop=y_end, num=size, endpoint=False)
-    ticks = np.linspace(0.5, N_layers - 0.5, N_layers)
-
-    plt.figure()
-    plt.imshow(perf_32, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
-    plt.colorbar()
-    plt.xticks(ticks=ticks, labels=layer)
-    plt.yticks(ticks=ticks, labels=layer)
-    plt.xlabel('Conv2')
-    plt.ylabel('Conv1')
-    plt.title(r'Norm Residual Coefficients')
-
-    for y_index, y in enumerate(y_positions):
-        for x_index, x in enumerate(x_positions):
-            label = param_32[y_index, x_index]
-            if label / 1000 < 1.0:      # Hundreds of Thousands
-                s = "%dK" % label
-            elif label / 1000 > 1.0:    # Millions
-                s = "%.1fM" % (label / 1000)
-
-            text_x = x + jump_x
-            text_y = y + jump_y
-            plt.text(text_x, text_y, s, color='black', ha='center', va='center')
-
-    plt.show()
-
-    # ================================================================================================================ #
-    # Show a comparison between a model with 2 layers [Conv1, Conv2] and a model with 3 layers [32, Conv1
-
-    results = [perf, perf_32, perf_64]
-    params = [param, param_32, param_64]
-    minc = np.min([np.min(x) for x in results])
-    maxc = np.max([np.max(x) for x in results])
-
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3)
-
-    img1 = ax1.imshow(perf, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
-    img1.set_clim(minc, maxc)
-    plt.colorbar(img1, ax=ax1, orientation='horizontal')
-    ax1.set_title(r'Architecture [Conv1, Conv2, FC]')
-
-    img2 = ax2.imshow(perf_32, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
-    img2.set_clim(minc, maxc)
-    plt.colorbar(img2, ax=ax2, orientation='horizontal')
-    ax2.set_title(r'Architecture [Conv0(32), Conv1, Conv2, FC]')
-
-    img3 = ax3.imshow(perf_64, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
-    img3.set_clim(minc, maxc)
-    plt.colorbar(img3, ax=ax3, orientation='horizontal')
-    ax3.set_title(r'Architecture [Conv0(64), Conv1, Conv2, FC]')
-
-    for ax, data in zip([ax1, ax2, ax3], [param, param_32, param_64]):
-        ax.set_xlabel('Conv2 [Filters]')
-        ax.set_ylabel('Conv1 [Filters]')
-
-        ax.set_xticks(ticks=ticks)
-        ax.set_xticklabels(labels=layer)
-        ax.set_yticks(ticks=ticks)
-        ax.set_yticklabels(labels=layer)
-
-        for y_index, y in enumerate(y_positions):
-            for x_index, x in enumerate(x_positions):
-                label = data[y_index, x_index]
-                if label / 1000 < 1.0:      # Hundreds of Thousands
-                    s = "%dK" % label
-                elif label / 1000 > 1.0:    # Millions
-                    s = "%.1fM" % (label / 1000)
-
-                text_x = x + jump_x
-                text_y = y + jump_y
-                ax.text(text_x, text_y, s, color='black', ha='center', va='center')
-
-    plt.show()

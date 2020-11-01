@@ -302,7 +302,7 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def create_cnn_model(self, layer_filters, kernel_size, name, activation='relu', dropout=None, anamorphic=False):
+    def create_cnn_model(self, layer_filters, kernel_size, name, N_dense=1, activation='relu', dense_acti=None, dropout=None, anamorphic=False):
         """
         Creates a CNN model for NCPA calibration
 
@@ -347,8 +347,14 @@ class Calibration(object):
                 model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation))
             model.add(Flatten())
 
+        dense_activation = activation if dense_acti is None else dense_acti
+        if N_dense > 1:
+
+            for k in range(N_dense - 1):
+                model.add(Dense(2 ** (N_dense - k) * self.PSF_model.N_coef, activation=dense_activation))
         model.add(Dense(self.PSF_model.N_coef))         # N_classes is the number of NCPA coefficients of the PSF model
         model.summary()
+
         model.compile(optimizer='adam', loss='mean_squared_error')
 
         self.cnn_model = model
