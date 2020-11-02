@@ -214,7 +214,7 @@ if __name__ == """__main__""":
         norm_res = np.mean(norm(residual_coef, axis=1))
         perf_dense[j] = norm_res
         # ?? Delete the models?
-        del calib_dense.cnn_model
+        del calib_zern.cnn_model
         clear_session()
 
     for i in range(N_cnn):
@@ -228,7 +228,7 @@ if __name__ == """__main__""":
     SNR = 250
 
     calib_noisy = calibration.Calibration(PSF_model=PSF_zernike)
-    layer = np.array([4, 8, 16])
+    layer = np.array([4, 8, 16, 32])
     N_layers = layer.shape[0]
     perf_noisy = np.zeros((N_layers, N_layers))
     param_noisy = np.zeros((N_layers, N_layers))
@@ -253,6 +253,138 @@ if __name__ == """__main__""":
             del calib_noisy.cnn_model
             clear_session()
 
+    # ================================================================================================================ #
+    #                   HYPERPARAMETER TUNING
+    # ================================================================================================================ #
+
+    import keras
+    from keras.models import Sequential
+    from keras.layers import Conv2D, Flatten, Dense
+
+    # from tensorflow import keras
+    # from tensorflow.keras.layers import (
+    #     Conv2D,
+    #     Dense,
+    #     Dropout,
+    #     Flatten,
+    #     MaxPooling2D
+    # )
+    from kerastuner.tuners import Hyperband
+    from kerastuner import HyperModel
+
+    class CNNHyperModel(HyperModel):
+
+        def __init__(self, input_shape, num_classes):
+            self.input_shape = input_shape
+            self.num_classes = num_classes
+            self.activation = 'relu'
+
+        def build(self, hp):
+
+            model = keras.Sequential()
+            model.add(Conv2D(filters=hp.Choice('num_filters_0', values=[8, 16, 32, 64], default=64,),
+                             kernel_size=3, activation=self.activation, input_shape=self.input_shape))
+
+            for i in range(hp.Int('num_layers', 1, 4)):
+                model.add(Conv2D(filters=hp.Choice('num_filters_%d' % (i), values=[8, 16, 32, 64], default=64,),
+                                 kernel_size=(kernel_size, kernel_size), activation=self.activation))
+            model.add(Flatten())
+            model.add(Dense(N_zern))
+            model.summary()
+
+            model.compile(optimizer=keras.optimizers.Adam(hp.Choice('learning_rate', values=[1e-1, 1e-2, 1e-3, 1e-4])),
+                          loss='mean_squared_error')
+            return model
+
+    hypermodel = CNNHyperModel(input_shape=input_shape, num_classes=N_zern)
+
+    HYPERBAND_MAX_EPOCHS = 40
+    MAX_TRIALS = 20
+    EXECUTION_PER_TRIAL = 2
+
+
+    tuner = Hyperband(
+        hypermodel,
+        max_epochs=HYPERBAND_MAX_EPOCHS,
+        objective='val_loss',
+        executions_per_trial=EXECUTION_PER_TRIAL,
+        directory='hyperband',
+        project_name='hyperparam'
+    )
+
+    tuner.search_space_summary()
+
+    tuner.search(train_PSF, train_coef, epochs=10,
+                 validation_data=(test_PSF, test_coef))
+
+    tuner.results_summary()
+    best_model = tuner.get_best_models(num_models=1)[0]
+
+    # best HP
+    best_hp = tuner.get_best_hyperparameters()[0]
+    print(best_hp.values)
+
+    guess_best = best_model.predict(test_PSF)
+    residual_coef = test_coef - guess_best
+    norm_res = np.mean(norm(residual_coef, axis=1))
+    print(norm_res)
+
+    ### https://github.com/keras-team/keras-tuner/issues/122
+    class MyTuner(kerastuner.tuners.BayesianOptimization):
+        def run_trial(self, trial, *args, **kwargs):
+            # You can add additional HyperParameters for preprocessing and custom training loops
+            # via overriding `run_trial`
+            kwargs['batch_size'] = trial.hyperparameters.Int('batch_size', 32, 256, step=32)
+            kwargs['epochs'] = trial.hyperparameters.Int('epochs', 10, 30)
+            super(MyTuner, self).run_trial(trial, *args, **kwargs)
+
+
+    # Uses same arguments as the BayesianOptimization Tuner.
+    tuner = MyTuner(...)
+    # Don't pass epochs or batch_size here, let the Tuner tune them.
+    tuner.search(...)
+
+
+
+    # ROC
+    def calculate_roc(test_coef, guess_coef):
+
+        eps_min = 0.01
+        N_eps = 50
+        percentage = np.linspace(0, eps_min, N_eps)
+
+        N_samples = test_coef.shape[0]
+        N_coef = test_coef.shape[-1]
+        roc = np.zeros((N_coef, N_eps))
+        rel_diff = np.zeros((N_samples, N_coef))
+        for k in range(N_coef):
+            for i in range(N_samples):
+                res = test_coef[i, k] - guess_coef[i, k]
+                rel_diff[i, k] = np.abs(res / test_coef[i, k]) * 100
+
+            values = rel_diff[:, k]
+            for j in range(N_eps):
+                threshold = percentage[j]
+                num = values > threshold
+                roc[k, j] = np.sum(num) / N_samples
+
+
+        return rel_diff, roc
+
+    rel_diff, roc = calculate_roc(test_coef, guess_best)
+
+    eps_min = 0.01
+    N_eps = 50
+    percentage = np.linspace(0, eps_min, N_eps)
+    plt.figure()
+    plt.plot(percentage, roc[0])
+    plt.show()
+
+
+
+
+
+    # ================================================================================================================ #
 
     ### Old stuff
 
