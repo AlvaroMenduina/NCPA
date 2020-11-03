@@ -261,7 +261,7 @@ def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, ana
     H_matrix = zern.invert_model_matrix(H_flat, pupil)
     N_zern = H_matrix.shape[-1]         # Update the total number of Zernikes
 
-    print("\nCalculating Zernike Wavefront Matrix (Influence Functions)")
+    # print("\nCalculating Zernike Wavefront Matrix (Influence Functions)")
 
     return H_matrix, pupil, H_flat
 

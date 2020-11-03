@@ -302,7 +302,8 @@ class Calibration(object):
         print("Updated")
         return dataset
 
-    def create_cnn_model(self, layer_filters, kernel_size, name, N_dense=1, activation='relu', dense_acti=None, dropout=None, anamorphic=False):
+    def create_cnn_model(self, layer_filters, kernel_size, name, N_dense=1, activation='relu', dense_acti=None,
+                         dropout=None, learning_rate=1e-3, anamorphic=False):
         """
         Creates a CNN model for NCPA calibration
 
@@ -355,7 +356,7 @@ class Calibration(object):
         model.add(Dense(self.PSF_model.N_coef))         # N_classes is the number of NCPA coefficients of the PSF model
         model.summary()
 
-        model.compile(optimizer='adam', loss='mean_squared_error')
+        model.compile(optimizer=keras.optimizers.Adam(lr=learning_rate), loss='mean_squared_error')
 
         self.cnn_model = model
 
