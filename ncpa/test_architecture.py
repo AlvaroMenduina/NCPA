@@ -411,18 +411,20 @@ if __name__ == """__main__""":
         def __init__(self, input_shape, num_classes):
             self.input_shape = input_shape
             self.num_classes = num_classes
-            self.activation = 'relu'
+            # self.activation = 'relu'
 
         def build(self, hp):
 
             model = Sequential()
             model.add(Conv2D(filters=hp.Choice('num_filters_0', values=[8, 16, 32, 64]),
-                             kernel_size=hp.Choice('kernel_size', values=[3, 4, 5]),
-                             activation=self.activation, input_shape=self.input_shape))
+                             kernel_size=hp.Choice('kernel_size_0', values=[3, 4, 5]),
+                             activation=hp.Choice('activation_0', values=['relu', 'tanh']),
+                             input_shape=self.input_shape))
 
             for i in range(hp.Int('num_layers', 1, 3)):
                 model.add(Conv2D(filters=hp.Choice('num_filters_%d' % (i + 1), values=[8, 16, 32, 64]),
-                                 kernel_size=(kernel_size, kernel_size), activation=self.activation))
+                                 kernel_size=hp.Choice('kernel_size_%d' % (i + 1), values=[3, 4, 5]),
+                                 activation=hp.Choice('activation_%d' % (i + 1), values=['relu', 'tanh'])))
             model.add(Flatten())
             model.add(Dense(N_zern))
             model.summary()
@@ -433,8 +435,8 @@ if __name__ == """__main__""":
 
     hypermodel = CNNHyperModel(input_shape=input_shape, num_classes=N_zern)
 
-    HYPERBAND_MAX_EPOCHS = 7
-    MAX_TRIALS = 40
+    HYPERBAND_MAX_EPOCHS = 8
+    MAX_TRIALS = 50
     EXECUTION_PER_TRIAL = 2
 
 
@@ -472,10 +474,10 @@ if __name__ == """__main__""":
                  validation_data=(test_PSF_noisy, test_coef_noisy))
 
     tuner.results_summary()
-    best_model = tuner.get_best_models(num_models=1)[0]
+    best_model = tuner.get_best_models(num_models=3)[2]
 
     # best HP
-    best_hp = tuner.get_best_hyperparameters()[0]
+    best_hp = tuner.get_best_hyperparameters(10)[0]
     print(best_hp.values)
 
     guess_best = best_model.predict(test_PSF_noisy)
@@ -535,6 +537,16 @@ if __name__ == """__main__""":
         ax.legend(title='Iteration (AUC)', loc=3)
         ax.set_title(r'ROC-Strehl | HyperParam Architecture | SNR %d' % _snr)
     plt.show()
+
+    # train a reference model
+    layer_filters = [32, 32]
+
+    calib_noisy.create_cnn_model(layer_filters, kernel_size, name='NOISE', activation='relu')
+    losses = calib_noisy.train_calibration_model(train_PSF_noisy, train_coef_noisy,
+                                                 test_PSF_noisy, test_coef_noisy,
+                                                 N_loops=1, epochs_loop=5, verbose=1, batch_size_keras=32,
+                                                 plot_val_loss=False, readout_noise=False,
+                                                 RMS_readout=[1. / SNR], readout_copies=readout_copies)
 
     ### https://github.com/keras-team/keras-tuner/issues/122
     # class MyTuner(kerastuner.tuners.BayesianOptimization):
