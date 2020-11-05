@@ -1,6 +1,15 @@
 """
 
 
+                    -||  ARCHITECTURE  ||-
+
+Investigation into different CNN Architecture Hyper-parameters
+
+- Hyper-parameter tuning (Keras-tuner Hyperband)
+
+Author: Alvaro Menduina
+Date: Nov 2020
+
 
 """
 
@@ -10,10 +19,16 @@ from numpy.linalg import norm
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
+from keras.backend import clear_session
+from keras.utils.layer_utils import count_params
+
 import psf
 import utils
 import calibration
 
+# In case we modify Calibration while running this experiment, we can reload the changes
+import importlib
+importlib.reload(calibration)
 
 # PSF bits
 N_PIX = 256                         # pixels for the Fourier arrays
@@ -27,8 +42,8 @@ utils.check_spaxel_scale(rho_aper=RHO_APER, wavelength=WAVE)
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
-N_levels = 10                        # Number of Zernike radial levels levels
-coef_strength = 0.17                # Strength of Zernike aberrations
+N_levels = 8                        # Number of Zernike radial levels levels
+coef_strength = 0.2                # Strength of Zernike aberrations
 diversity = 1.0                     # Strength of the Defocus diversity
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 kernel_size = 3
@@ -38,8 +53,161 @@ N_loops, epochs_loop = 5, 5         # How many times to loop over the training
 readout_copies = 2                  # How many copies with Readout Noise to use
 N_iter = 3                          # How many iterations to run the calibration (testing)
 
-import importlib
-importlib.reload(calibration)
+
+def calculate_roc(calibration_model, PSF_model, test_images, test_coef, N_iter=3, noise=False, SNR_noise=None):
+    """
+    Calculate the 'equivalent' of Receiving Operating Characteristic curve for a calibration model
+
+    At each iteration, we calculate the ratio between the norm of the residual coefficients
+    and the norm of the original test coefficients. Then we calculate the fraction of PSF cases
+    for which that ratio is below a certain threshold.
+
+    This gives us an idea of the performance of the model
+
+    :param calibration_model:
+    :param PSF_model:
+    :param test_images:
+    :param test_coef:
+    :param N_iter:
+    :param noise:
+    :param SNR_noise:
+    :return:
+    """
+
+    N_PSF = test_coef.shape[0]                              # How many PSF cases do we have
+    N_eps = 200                                             # How many thresholds to sample
+    percentage = np.linspace(0, 100, N_eps)                 # Array of percentage thresholds
+    roc = np.zeros((N_iter, N_eps))                         # ROC array
+
+    # get the norm of the test coef at the beginning
+    norm_test0 = norm(test_coef, axis=1)
+
+    if noise:
+        # Add readout noise to the test images
+        test_images = calibration_model.noise_effects.add_readout_noise(test_images, RMS_READ=1 / SNR_noise)
+
+    # placeholder arrays for the images and coefficients
+    psf0, coef0 = test_images, test_coef
+    for k in range(N_iter):
+        print("\nIteration #%d" % (k + 1))
+        # predict the coefficients
+        guess = calibration_model.cnn_model.predict(psf0)
+        residual = coef0 - guess
+        norm_residual = norm(residual, axis=1)
+        # compare the norm of the residual to that of the original coefficients
+        ratios = norm_residual / norm_test0 * 100
+
+        # calculate the ROC
+        for j in range(N_eps):
+            # compute the fraction of cases whose ratio norm residual / norm test coef is smaller than threshold
+            roc[k, j] = np.sum(ratios < percentage[j]) / N_PSF
+
+        # update the PSF images for the next iteration
+        new_PSF = np.zeros_like(test_images)
+        for i in range(N_PSF):
+            if i % 500 == 0:
+                print(i)
+            psf_nom, s_nom = PSF_model.compute_PSF(residual[i])
+            psf_foc, s_foc = PSF_model.compute_PSF(residual[i], diversity=True)
+            new_PSF[i, :, :, 0] = psf_nom
+            new_PSF[i, :, :, 1] = psf_foc
+
+        if noise:
+            # Add readout noise to the test images
+            new_PSF = calibration_model.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR_noise)
+
+        # Overwrite the placeholder arrays for the next iteration
+        psf0 = new_PSF
+        coef0 = residual
+
+    return roc, percentage, residual
+
+
+def calculate_strehl(PSF_model, coef):
+    """
+    Calculate the Strehl ratio for a set of aberration coefficients
+    :param PSF_model:
+    :param coef:
+    :return:
+    """
+
+    N_PSF = coef.shape[0]
+    strehl = np.zeros(N_PSF)
+
+    for k in range(N_PSF):
+        psf_nom, s_nom = PSF_model.compute_PSF(coef[k])
+        strehl[k] = s_nom
+
+    return strehl
+
+
+def calculate_cum_strehl(calibration_model, PSF_model, test_images, test_coef, N_iter=3, noise=False, SNR_noise=None):
+    """
+    Calculate the cumulative distribution of Strehl ratios as a function of iterations
+    Kind of similar to the ROC curve from above, but we use Strehl rather than ratio of coefficient norms
+
+    At each iteration, we calculate the Strehl ratio for all PSF images in the test set.
+    Then we calculate the fraction of PSF cases for which the Strehl ratio
+    is higher than a certain threshold.
+
+    This gives us an idea of the performance of the model
+
+    :param calibration_model:
+    :param PSF_model:
+    :param test_images:
+    :param test_coef:
+    :param N_iter:
+    :param noise:
+    :param SNR_noise:
+    :return:
+    """
+
+    N_PSF = test_coef.shape[0]                              # How many PSF cases do we have
+    N_strehl = 200                                          # How many Strehl thresholds to sample
+    strehl_threshold = np.linspace(0, 1, N_strehl)          # Array of Strehl thresholds
+    strehl_profiles = np.zeros((N_iter + 1, N_strehl))      # Cumulative distributions of Strehls
+
+    # calculate the original strehl
+    s0 = calculate_strehl(PSF_model, test_coef)
+    for j in range(N_strehl):
+        strehl_profiles[0, j] = np.sum(s0 > strehl_threshold[j]) / N_PSF
+
+    # Add Noise
+    if noise:
+        test_images = calibration_model.noise_effects.add_readout_noise(test_images, RMS_READ=1 / SNR_noise)
+
+    # Placeholder arrays for the iterations
+    psf0, coef0 = test_images, test_coef
+    for k in range(N_iter):
+        print("\nIteration #%d" % (k + 1))
+        # predict the coefficients
+        guess = calibration_model.cnn_model.predict(psf0)
+        residual = coef0 - guess
+
+        # Update the Strehl ratios
+        new_strehl = calculate_strehl(PSF_model, residual)
+        for j in range(N_strehl):
+            strehl_profiles[k + 1, j] = np.sum(new_strehl > strehl_threshold[j]) / N_PSF
+
+        # update the PSF
+        new_PSF = np.zeros_like(test_images)
+        for i in range(N_test):
+            if i % 500 == 0:
+                print(i)
+            psf_nom, s_nom = PSF_model.compute_PSF(residual[i])
+            psf_foc, s_foc = PSF_model.compute_PSF(residual[i], diversity=True)
+            new_PSF[i, :, :, 0] = psf_nom
+            new_PSF[i, :, :, 1] = psf_foc
+
+        if noise:
+            new_PSF = calibration_model.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR_noise)
+
+        # Overwrite the arrays for the next iteration
+        psf0 = new_PSF
+        coef0 = residual
+
+    return strehl_profiles, strehl_threshold, residual
+
 
 if __name__ == """__main__""":
 
@@ -63,28 +231,41 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
     #                                         ARCHITECTURE investigation
     # ================================================================================================================ #
-    # Does the number of pixels used to crop the images matter?
+
+    # Generate some training dataset
     N_train = 20000
     train_PSF, train_coef, test_PSF, test_coef = calibration.generate_dataset(PSF_zernike, N_train, N_test,
                                                                               coef_strength, rescale)
 
-    epochs = 10
+    # show the distribution of Strehls
+    peaks_train, peaks_test = np.max(train_PSF[:, :, :, 0], axis=(1, 2)), np.max(test_PSF[:, :, :, 0], axis=(1, 2))
+    n_bins = 25
+    plt.figure()
+    plt.hist(peaks_train, bins=2*n_bins, density=True, label=r'Training')
+    plt.hist(peaks_test, histtype='step', bins=n_bins, color='black',  density=True, label='Testing')
+    plt.xlim([0, 1])
+    plt.xlabel(r'Strehl ratio')
+    plt.ylabel(r'PDF')
+    plt.legend(title='Dataset', loc=1)
+    plt.show()
 
-    from keras.backend import clear_session
-    from keras.utils.layer_utils import count_params
+    epochs = 15
 
+    # Impact of the number of the Number of FILTERS of Convolutional Layers
+    # We test an architecture with 2 CNN Layers + 1 Dense layer, and see how the N FILTERS affects the performance
     calib_zern = calibration.Calibration(PSF_model=PSF_zernike)
     layer = np.array([4, 8, 16, 32])
     N_layers = layer.shape[0]
-    perf_sigm = np.zeros((N_layers, N_layers))
-    param_sigm = np.zeros((N_layers, N_layers))
+    perf = np.zeros((N_layers, N_layers))           # Performance (norm of the residual coefficients)
+    param = np.zeros((N_layers, N_layers))          # Number of trainable parameters of each model
+
     for i in range(N_layers):
         for j in range(N_layers):
-            layer_filters = [layer[i], layer[j]]
 
-            calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='sigmoid')
+            layer_filters = [layer[i], layer[j]]
+            calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='relu')
             trainable_count = count_params(calib_zern.cnn_model.trainable_weights) / 1000
-            param_sigm[i, j] = trainable_count           # How many K parameters
+            param[i, j] = trainable_count           # How many Keras parameters
             losses = calib_zern.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
                                                         N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
                                                         plot_val_loss=False, readout_noise=False,
@@ -94,43 +275,42 @@ if __name__ == """__main__""":
             guess_coef = calib_zern.cnn_model.predict(test_PSF)
             residual_coef = test_coef - guess_coef
             norm_res = np.mean(norm(residual_coef, axis=1))
-            perf_sigm[i, j] = norm_res
+            perf[i, j] = norm_res
             # ?? Delete the models?
             del calib_zern.cnn_model
             clear_session()
 
+    # Make an plt.imshow() and include labels showing the number of trainable parameters for each model
+
     # Limits for the extent
-    x_start = 0
-    x_end = N_layers
-    y_start = 0
-    y_end = N_layers
+    x_start, x_end = 0, N_layers
+    y_start, y_end = 0, N_layers
     size = N_layers
 
-    jump_x = (x_end - x_start) / (2.0 * size)
-    jump_y = (y_end - y_start) / (2.0 * size)
+    jump_x, jump_y = (x_end - x_start) / (2.0 * size), (y_end - y_start) / (2.0 * size)
     x_positions = np.linspace(start=x_start, stop=x_end, num=size, endpoint=False)
     y_positions = np.linspace(start=y_start, stop=y_end, num=size, endpoint=False)
     ticks = np.linspace(0.5, N_layers - 0.5, N_layers)
 
     plt.figure()
-    plt.imshow(perf_sigm, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    plt.imshow(perf, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
     plt.colorbar()
     plt.xticks(ticks=ticks, labels=layer)
     plt.yticks(ticks=ticks, labels=layer)
-    plt.xlabel('Conv2')
-    plt.ylabel('Conv1')
+    plt.xlabel('Conv2 [Filters]')
+    plt.ylabel('Conv1 [Filters]')
     plt.title(r'Norm Residual Coefficients')
 
+    # Add the text with the N trainable params
     for y_index, y in enumerate(y_positions):
         for x_index, x in enumerate(x_positions):
-            label = param_tanh[y_index, x_index]
+            label = param[y_index, x_index]
             if label / 1000 < 1.0:      # Hundreds of Thousands
                 s = "%dK" % label
             elif label / 1000 > 1.0:    # Millions
                 s = "%.1fM" % (label / 1000)
 
-            text_x = x + jump_x
-            text_y = y + jump_y
+            text_x, text_y = x + jump_x, y + jump_y
             plt.text(text_x, text_y, s, color='black', ha='center', va='center')
 
     plt.show()
@@ -141,6 +321,9 @@ if __name__ == """__main__""":
     # results = [perf, perf_32, perf_64]
     # params = [param, param_32, param_64]
     #
+
+    # [WATCH OUT!] because this bit is "hardcoded", we just run it multiple times changing the parameters
+
     results = [perf_relu, perf_tanh]
     params = [param_relu, param_tanh]
     minc = np.min([np.min(x) for x in results])
@@ -189,19 +372,20 @@ if __name__ == """__main__""":
     plt.show()
     # ================================================================================================================ #
     # Impact of FULLY-CONNECTED layers
+    # We add multiple Dense Layers after the Convolutional Layers, and see how the performance changes
 
     calib_dense = calibration.Calibration(PSF_model=PSF_zernike)
     dense_layers = np.array([1, 2, 3, 4])
     N_dense = dense_layers.shape[0]
+    dense_activation = 'tanh'           # We can also choose the activation for the Dense Layers (except the last one(
     cnn_layers = [8, 4]
-    # N_cnn = len(cnn_layers)
-    perf_dense = np.zeros((N_dense))
-    param_dense = np.zeros((N_dense))
+    perf_dense = np.zeros(N_dense)
+    param_dense = np.zeros(N_dense)
 
     for j in range(N_dense):
         layer_filters = cnn_layers
         calib_dense.create_cnn_model(layer_filters, kernel_size, N_dense=dense_layers[j], name='DENSE',
-                                     activation='relu', dense_acti='tanh')
+                                     activation='relu', dense_acti=dense_activation)
         trainable_count = count_params(calib_dense.cnn_model.trainable_weights) / 1000
         param_dense[j] = trainable_count           # How many K parameters
         losses = calib_dense.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
@@ -218,186 +402,12 @@ if __name__ == """__main__""":
         del calib_zern.cnn_model
         clear_session()
 
-    for i in range(N_cnn):
-        plt.plot(dense_layers, perf_dense[i])
-    plt.show()
-
+    print("\nPerformance as function of N of dense layers:")
+    print(perf_dense)
 
     # ================================================================================================================ #
-    # Now with Noise
-
-    SNR = 250
-    readout_copies = 3
-    N_roc = 4
-
-    calib_noisy = calibration.Calibration(PSF_model=PSF_zernike)
-    layer = np.array([4, 8, 16, 32])
-    N_layers = layer.shape[0]
-    perf_noisy = np.zeros((N_layers, N_layers))
-    param_noisy = np.zeros((N_layers, N_layers))
-    for i in range(N_layers):
-        for j in range(N_layers):
-            layer_filters = [layer[i], layer[j]]
-
-            calib_noisy.create_cnn_model(layer_filters, kernel_size, name='NOISE', activation='relu')
-            trainable_count = count_params(calib_noisy.cnn_model.trainable_weights) / 1000
-            param_noisy[i, j] = trainable_count           # How many K parameters
-            losses = calib_noisy.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
-                                                        N_loops=3, epochs_loop=3, verbose=1, batch_size_keras=32,
-                                                        plot_val_loss=False, readout_noise=True,
-                                                        RMS_readout=[1. / SNR], readout_copies=readout_copies)
-
-            # test_PSF_noise = calib_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
-            # guess_coef = calib_noisy.cnn_model.predict(test_PSF_noise)
-            # residual_coef = test_coef - guess_coef
-            # norm_res = np.mean(norm(residual_coef, axis=1))
-
-            roc, percentage, _res = calculate_roc(calib_noisy, PSF_zernike, test_PSF, test_coef, N_roc, noise=True)
-
-            perf_noisy[i, j] = norm_res
-            # ?? Delete the models?
-            del calib_noisy.cnn_model
-            clear_session()
-
-    # Limits for the extent
-    x_start = 0
-    x_end = N_layers
-    y_start = 0
-    y_end = N_layers
-    size = N_layers
-
-    jump_x = (x_end - x_start) / (2.0 * size)
-    jump_y = (y_end - y_start) / (2.0 * size)
-    x_positions = np.linspace(start=x_start, stop=x_end, num=size, endpoint=False)
-    y_positions = np.linspace(start=y_start, stop=y_end, num=size, endpoint=False)
-    ticks = np.linspace(0.5, N_layers - 0.5, N_layers)
-
-    plt.figure()
-    plt.imshow(perf_noisy, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
-    plt.colorbar()
-    plt.xticks(ticks=ticks, labels=layer)
-    plt.yticks(ticks=ticks, labels=layer)
-    plt.xlabel('Conv2')
-    plt.ylabel('Conv1')
-    plt.title(r'Norm Residual Coefficients')
-
-    for y_index, y in enumerate(y_positions):
-        for x_index, x in enumerate(x_positions):
-            label = param_noisy[y_index, x_index]
-            if label / 1000 < 1.0:      # Hundreds of Thousands
-                s = "%dK" % label
-            elif label / 1000 > 1.0:    # Millions
-                s = "%.1fM" % (label / 1000)
-
-            text_x = x + jump_x
-            text_y = y + jump_y
-            plt.text(text_x, text_y, s, color='black', ha='center', va='center')
-
-    plt.show()
-
+    #                          HYPERPARAMETER TUNING
     # ================================================================================================================ #
-    #                   HYPERPARAMETER TUNING
-    # ================================================================================================================ #
-
-    def calculate_roc(calibration_model, PSF_model, test_images, test_coef, N_iter=3, noise=False, SNR_noise=None):
-
-        N_test = test_coef.shape[0]
-        N_eps = 200
-        percentage = np.linspace(0, 100, N_eps)
-        roc = np.zeros((N_iter, N_eps))
-
-        # get the norm of the test coef
-        norm_test0 = norm(test_coef, axis=1)
-
-        if noise:
-            test_images = calibration_model.noise_effects.add_readout_noise(test_images, RMS_READ=1 / SNR_noise)
-
-        psf0, coef0 = test_images, test_coef
-        for k in range(N_iter):
-            print("\nIteration #%d" % (k + 1))
-            # predict the coefficients
-            guess = calibration_model.cnn_model.predict(psf0)
-            residual = coef0 - guess
-            norm_residual = norm(residual, axis=1)
-            # compare the norm of the residual to that of the original coefficients
-            ratios = norm_residual / norm_test0 * 100
-            # calculate the ROC
-            for j in range(N_eps):
-                roc[k, j] = np.sum(ratios < percentage[j]) / N_test
-
-            # update the PSF
-            new_PSF = np.zeros_like(test_images)
-            for i in range(N_test):
-                if i % 500 == 0:
-                    print(i)
-                psf_nom, s_nom = PSF_model.compute_PSF(residual[i])
-                psf_foc, s_foc = PSF_model.compute_PSF(residual[i], diversity=True)
-                new_PSF[i, :, :, 0] = psf_nom
-                new_PSF[i, :, :, 1] = psf_foc
-
-            if noise:
-                new_PSF = calibration_model.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR_noise)
-
-            # Overwrite the arrays for the next iteration
-            psf0 = new_PSF
-            coef0 = residual
-
-        return roc, percentage, residual
-
-    def calculate_strehl(PSF_model, coef):
-
-        N_PSF = coef.shape[0]
-        strehl = np.zeros(N_PSF)
-        for k in range(N_PSF):
-            psf_nom, s_nom = PSF_model.compute_PSF(coef[k])
-            strehl[k] = s_nom
-        return strehl
-
-    def calculate_cum_strehl(calibration_model, PSF_model, test_images, test_coef, N_iter=3, noise=False, SNR_noise=None):
-
-        N_PSF = test_coef.shape[0]
-        N_strehl = 200
-        strehl_threshold = np.linspace(0, 1, N_strehl)
-        strehl_profiles = np.zeros((N_iter + 1, N_strehl))
-
-        # calculate the original strehl
-        s0 = calculate_strehl(PSF_model, test_coef)
-        for j in range(N_strehl):
-            strehl_profiles[0, j] = np.sum(s0 > strehl_threshold[j]) / N_PSF
-
-        # Add Noise
-        if noise:
-            test_images = calibration_model.noise_effects.add_readout_noise(test_images, RMS_READ=1 / SNR_noise)
-
-        psf0, coef0 = test_images, test_coef
-        for k in range(N_iter):
-            print("\nIteration #%d" % (k + 1))
-            # predict the coefficients
-            guess = calibration_model.cnn_model.predict(psf0)
-            residual = coef0 - guess
-
-            new_strehl = calculate_strehl(PSF_model, residual)
-            for j in range(N_strehl):
-                strehl_profiles[k + 1, j] = np.sum(new_strehl > strehl_threshold[j]) / N_PSF
-
-            # update the PSF
-            new_PSF = np.zeros_like(test_images)
-            for i in range(N_test):
-                if i % 500 == 0:
-                    print(i)
-                psf_nom, s_nom = PSF_model.compute_PSF(residual[i])
-                psf_foc, s_foc = PSF_model.compute_PSF(residual[i], diversity=True)
-                new_PSF[i, :, :, 0] = psf_nom
-                new_PSF[i, :, :, 1] = psf_foc
-
-            if noise:
-                new_PSF = calibration_model.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR_noise)
-
-            # Overwrite the arrays for the next iteration
-            psf0 = new_PSF
-            coef0 = residual
-
-        return strehl_profiles, strehl_threshold, residual
 
     from tensorflow import keras
     from tensorflow.keras.models import Sequential
@@ -407,6 +417,9 @@ if __name__ == """__main__""":
     from kerastuner import HyperModel
 
     class CNNHyperModel(HyperModel):
+        """
+        Here we subclass HyperModel to define our own architecture
+        """
 
         def __init__(self, input_shape, num_classes):
             self.input_shape = input_shape
@@ -414,6 +427,18 @@ if __name__ == """__main__""":
             # self.activation = 'relu'
 
         def build(self, hp):
+            """
+            Build a Keras model with varying hyper-parameters
+
+            Things that we allow to vary:
+                - Adam optimiser learning rate
+                - Number of Conv. layers
+                - Kernel size for each layer
+                - Filters for each layer
+                - Activation function for each layer
+            :param hp:
+            :return:
+            """
 
             model = Sequential()
             model.add(Conv2D(filters=hp.Choice('num_filters_0', values=[8, 16, 32, 64]),
@@ -435,11 +460,9 @@ if __name__ == """__main__""":
 
     hypermodel = CNNHyperModel(input_shape=input_shape, num_classes=N_zern)
 
-    HYPERBAND_MAX_EPOCHS = 8
+    HYPERBAND_MAX_EPOCHS = 15
     MAX_TRIALS = 50
     EXECUTION_PER_TRIAL = 2
-
-
     tuner = Hyperband(
         hypermodel,
         max_epochs=HYPERBAND_MAX_EPOCHS,
@@ -451,19 +474,24 @@ if __name__ == """__main__""":
 
     tuner.search_space_summary()
 
+    calib_noisy = calibration.Calibration(PSF_model=PSF_zernike)
+
     # Get some noisy
+    N_copies = 1
     readout_copies = 3
-    SNRs = [250, 500, 750]
+    # SNRs = [250, 500, 750]
+    SNRs = [50, 100, 200]
     train_PSF_noisy, train_coef_noisy = [], []
     test_PSF_noisy, test_coef_noisy = [], []
     for k in range(readout_copies):
-        noisy_train = calib_noisy.noise_effects.add_readout_noise(train_PSF, RMS_READ=1 / SNRs[k])
-        train_PSF_noisy.append(noisy_train)
-        train_coef_noisy.append(train_coef)
+        for j in range(N_copies):
+            noisy_train = calib_noisy.noise_effects.add_readout_noise(train_PSF, RMS_READ=1 / SNRs[k])
+            train_PSF_noisy.append(noisy_train)
+            train_coef_noisy.append(train_coef)
 
-        noisy_test = calib_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNRs[k])
-        test_PSF_noisy.append(noisy_test)
-        test_coef_noisy.append(test_coef)
+            noisy_test = calib_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNRs[k])
+            test_PSF_noisy.append(noisy_test)
+            test_coef_noisy.append(test_coef)
 
     train_PSF_noisy = np.concatenate(train_PSF_noisy, axis=0)
     train_coef_noisy = np.concatenate(train_coef_noisy, axis=0)
@@ -474,10 +502,10 @@ if __name__ == """__main__""":
                  validation_data=(test_PSF_noisy, test_coef_noisy))
 
     tuner.results_summary()
-    best_model = tuner.get_best_models(num_models=3)[2]
+    best_model = tuner.get_best_models(num_models=1)[0]
 
     # best HP
-    best_hp = tuner.get_best_hyperparameters(10)[0]
+    best_hp = tuner.get_best_hyperparameters()[0]
     print(best_hp.values)
 
     guess_best = best_model.predict(test_PSF_noisy)
@@ -488,7 +516,7 @@ if __name__ == """__main__""":
     calib_noisy.cnn_model = best_model
 
     N_roc = 5
-
+    SNRs = [250, 500, 750]
     S = len(SNRs)
     colors_array = [cm.Reds(np.linspace(0.5, 1, N_roc)),
                     cm.Blues(np.linspace(0.5, 1, N_roc)),
@@ -548,6 +576,26 @@ if __name__ == """__main__""":
                                                  plot_val_loss=False, readout_noise=False,
                                                  RMS_readout=[1. / SNR], readout_copies=readout_copies)
 
+
+    # class MyTuner(Hyperband):
+    #     def run_trial(self, trial, *args, **kwargs):
+    #         # You can add additional HyperParameters for preprocessing and custom training loops
+    #         # via overriding `run_trial`
+    #         kwargs['batch_size'] = trial.hyperparameters.Int('batch_size', 32, 256, step=32)
+    #         super(MyTuner, self).run_trial(trial, *args, **kwargs)
+    #
+    #
+    # tuner = MyTuner(hypermodel,
+    #     max_epochs=HYPERBAND_MAX_EPOCHS,
+    #     objective='val_loss',
+    #     executions_per_trial=EXECUTION_PER_TRIAL,
+    #     directory='hyperband',
+    #     project_name='batch_size')
+    # # Don't pass epochs or batch_size here, let the Tuner tune them.
+    # tuner.search(...)
+
+
+
     ### https://github.com/keras-team/keras-tuner/issues/122
     # class MyTuner(kerastuner.tuners.BayesianOptimization):
     #     def run_trial(self, trial, *args, **kwargs):
@@ -563,8 +611,163 @@ if __name__ == """__main__""":
     # # Don't pass epochs or batch_size here, let the Tuner tune them.
     # tuner.search(...)
 
+    # ================================================================================================================ #
+
+    # Flat Field ??
+
+    calib_flat = calibration.Calibration(PSF_model=PSF_zernike)
+    layer_filters = [32, 32]
+    SNR = 500
+    calib_flat.create_cnn_model(layer_filters, kernel_size, name='FLATS', activation='relu')
+    # noisy_train = calib_flat.noise_effects.add_readout_noise(train_PSF, RMS_READ=1 / SNR)
+    losses = calib_flat.train_calibration_model(train_PSF, train_coef,
+                                                test_PSF, test_coef,
+                                                N_loops=1, epochs_loop=epochs, verbose=1, batch_size_keras=32,
+                                                plot_val_loss=False, readout_noise=False,
+                                                RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+    def add_flat_field(test_images, max_dev=0.10, noise='Uniform', sigma=1):
+
+        N_PSF = test_images.shape[0]
+        pix = test_images.shape[1]
+        flat_images = np.zeros_like(test_images)
+
+        for k in range(N_PSF):
+
+            psf_nom = test_images[k, :, :, 0]
+            psf_foc = test_images[k, :, :, 1]
+
+            # flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+            # flat_foc = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+
+            if noise == "Uniform":
+                flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+                # flat_foc = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+            elif noise == "Gaussian":
+                flat = np.random.normal(loc=1, scale=max_dev / sigma, size=(pix, pix))
+                # flat_foc = np.random.normal(loc=1, scale=max_dev / sigma, size=(pix, pix))
+            # flat_foc = np.random.normal(loc=1, scale=max_dev/3, size=(pix, pix))
+
+            flat_images[k, :, :, 0] = flat * psf_nom
+            flat_images[k, :, :, 1] = flat * psf_foc
+
+        return flat_images
 
 
+    noisy_test = calib_flat.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
+    residual_coef0 = test_coef - calib_flat.cnn_model.predict(noisy_test)
+    norm_res0 = np.mean(norm(residual_coef0, axis=1))
+
+    flat_devs = np.linspace(1e-3, 25, 100) / 100
+    N_flats = flat_devs.shape[0]
+
+    norms_flat_uniform = np.zeros(N_flats)
+    norms_flat_gaussian2sig = np.zeros(N_flats)
+    norms_flat_gaussian3sig = np.zeros(N_flats)
+
+    for k in range(N_flats):
+
+        test_PSF_flat_uniform = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
+        test_PSF_flat_gaussian2sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=2)
+        test_PSF_flat_gaussian3sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=3)
+
+        test_PSF_flat_uniform = calib_flat.noise_effects.add_readout_noise(test_PSF_flat_uniform, RMS_READ=1 / SNR)
+
+        residual_coef_uniform = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
+        norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
+        norms_flat_uniform[k] = (norm_res_uniform / norm_res0 - 1) * 100
+
+        residual_coef_gaussian = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_gaussian2sig)
+        norm_res_gaussian = np.mean(norm(residual_coef_gaussian, axis=1))
+        norms_flat_gaussian2sig[k] = (norm_res_gaussian / norm_res0 - 1) * 100
+
+        residual_coef_gaussian = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_gaussian3sig)
+        norm_res_gaussian = np.mean(norm(residual_coef_gaussian, axis=1))
+        norms_flat_gaussian3sig[k] = (norm_res_gaussian / norm_res0 - 1) * 100
+
+    colors = cm.Reds(np.linspace(0.5, 1, 3))
+    s = 10
+    plt.figure()
+    plt.scatter(flat_devs * 100, norms_flat_uniform, label=r'$\mathcal{U}\left[1-\Delta, 1+\Delta \right]$',
+                color=colors[0], s=s)
+    # plt.scatter(flat_devs * 100, norms_flat_gaussian2sig, label=r'$\mathcal{N}(1, %d\sigma=\Delta)$' % 2,
+    #             color=colors[1], s=s)
+    # plt.scatter(flat_devs * 100, norms_flat_gaussian3sig, label=r'$\mathcal{N}(1, %d\sigma=\Delta)$' % 3,
+    #             color=colors[2], s=s)
+    plt.xlabel(r'Flat Uncertainty $\Delta$ [percent]')
+    plt.ylabel(r'Change in Residual Norm [percent]')
+    plt.legend(title='Flat Field Model')
+    plt.grid(True)
+    plt.xlim([0, 25])
+    plt.ylim([0, 5])
+    plt.show()
+
+    # We have done this analysis for perfect PSF images. Only adding the flat fields.
+    # But what if we couple this with readout noise?
+
+    # we train a Calibration Model on Noisy Images with NO flat field
+    # then we test the performance by adding Flat Field errors, and then the Noise on top
+
+    calib_flat_noisy = calibration.Calibration(PSF_model=PSF_zernike)
+    # SNRs = [50, 100, 200]
+    SNRs = [250, 500, 750]
+    flat_devs = np.linspace(1e-3, 25, 100) / 100
+    N_flats = flat_devs.shape[0]
+    norms = np.zeros((3, N_flats))
+    norms_rel = np.zeros((3, N_flats))
+    for i, _snr in enumerate(SNRs):
+        calib_flat_noisy.create_cnn_model(layer_filters, kernel_size, name='FLATS', activation='relu')
+        # noisy_train = calib_flat.noise_effects.add_readout_noise(train_PSF, RMS_READ=1 / SNR)
+        losses = calib_flat_noisy.train_calibration_model(train_PSF, train_coef,
+                                                    test_PSF, test_coef,
+                                                    N_loops=1, epochs_loop=4, verbose=1, batch_size_keras=32,
+                                                    plot_val_loss=False, readout_noise=True,
+                                                    RMS_readout=[1. / _snr], readout_copies=readout_copies)
+
+        # repeat to get a good value
+        m = []
+        for j in range(10):
+            noisy_test = calib_flat_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / _snr)
+            residual_coef0 = test_coef - calib_flat_noisy.cnn_model.predict(noisy_test)
+            m.append(np.mean(norm(residual_coef0, axis=1)))
+
+        norm_res0 = np.mean(m)
+
+        norms_flat_uniform = np.zeros(N_flats)
+        # norms_flat_gaussian2sig = np.zeros(N_flats)
+        # norms_flat_gaussian3sig = np.zeros(N_flats)
+
+        for k in range(N_flats):
+            test_PSF_flat_uniform = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
+            test_PSF_flat_uniform = calib_flat_noisy.noise_effects.add_readout_noise(test_PSF_flat_uniform, RMS_READ=1 / _snr)
+
+            residual_coef_uniform = test_coef - calib_flat_noisy.cnn_model.predict(test_PSF_flat_uniform)
+            norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
+            # norms_flat_uniform[k] = (norm_res_uniform / norm_res0 - 1) * 100
+            norms_flat_uniform[k] = norm_res_uniform
+            norms[i, k] = norm_res_uniform
+            norms_rel[i, k] = (norm_res_uniform / norm_res0 - 1) * 100
+
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    for i, _snr in enumerate(SNRs):
+        ax1.scatter(flat_devs * 100, norms[i], label=r'SNR %d' % _snr,
+                    color=colors[i], s=s)
+        ax2.scatter(flat_devs * 100, norms_rel[i], label=r'SNR %d' % _snr,
+                    color=colors[i], s=s)
+    ax1.set_xlabel(r'Flat Uncertainty $\Delta$ [percent]')
+    ax2.set_xlabel(r'Flat Uncertainty $\Delta$ [percent]')
+    ax1.set_ylabel(r'Residual Coeff. Norm')
+    ax2.set_ylabel(r'Change in Residual Norm [percent]')
+    for ax in [ax1, ax2]:
+        ax.legend(title='Readout Noise', loc=2)
+        ax.set_title(r'Flat Field Model: U$\left[1-\Delta, 1+\Delta \right]$')
+        ax.grid(True)
+        ax.set_xlim([0, 25])
+    # plt.ylim(bottom=0)
+    plt.show()
+
+    # ================================================================================================================ #
     N_roc = 5
     roc, percentage, _res = calculate_roc(best_model, PSF_zernike, test_PSF, test_coef, N_roc)
 
@@ -749,6 +952,82 @@ if __name__ == """__main__""":
     # ================================================================================================================ #
 
     ### Old stuff
+
+
+    # ================================================================================================================ #
+    # Now with Noise
+
+    SNR = 250
+    readout_copies = 3
+    N_roc = 4
+
+    calib_noisy = calibration.Calibration(PSF_model=PSF_zernike)
+    layer = np.array([4, 8, 16, 32])
+    N_layers = layer.shape[0]
+    perf_noisy = np.zeros((N_layers, N_layers))
+    param_noisy = np.zeros((N_layers, N_layers))
+    for i in range(N_layers):
+        for j in range(N_layers):
+            layer_filters = [layer[i], layer[j]]
+
+            calib_noisy.create_cnn_model(layer_filters, kernel_size, name='NOISE', activation='relu')
+            trainable_count = count_params(calib_noisy.cnn_model.trainable_weights) / 1000
+            param_noisy[i, j] = trainable_count           # How many K parameters
+            losses = calib_noisy.train_calibration_model(train_PSF, train_coef, test_PSF, test_coef,
+                                                        N_loops=3, epochs_loop=3, verbose=1, batch_size_keras=32,
+                                                        plot_val_loss=False, readout_noise=True,
+                                                        RMS_readout=[1. / SNR], readout_copies=readout_copies)
+
+            # test_PSF_noise = calib_noisy.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
+            # guess_coef = calib_noisy.cnn_model.predict(test_PSF_noise)
+            # residual_coef = test_coef - guess_coef
+            # norm_res = np.mean(norm(residual_coef, axis=1))
+
+            roc, percentage, _res = calculate_roc(calib_noisy, PSF_zernike, test_PSF, test_coef, N_roc, noise=True)
+
+            perf_noisy[i, j] = norm_res
+            # ?? Delete the models?
+            del calib_noisy.cnn_model
+            clear_session()
+
+    # Limits for the extent
+    x_start = 0
+    x_end = N_layers
+    y_start = 0
+    y_end = N_layers
+    size = N_layers
+
+    jump_x = (x_end - x_start) / (2.0 * size)
+    jump_y = (y_end - y_start) / (2.0 * size)
+    x_positions = np.linspace(start=x_start, stop=x_end, num=size, endpoint=False)
+    y_positions = np.linspace(start=y_start, stop=y_end, num=size, endpoint=False)
+    ticks = np.linspace(0.5, N_layers - 0.5, N_layers)
+
+    plt.figure()
+    plt.imshow(perf_noisy, cmap='Reds', origin='lower', extent=[x_start, x_end, y_start, y_end])
+    plt.colorbar()
+    plt.xticks(ticks=ticks, labels=layer)
+    plt.yticks(ticks=ticks, labels=layer)
+    plt.xlabel('Conv2')
+    plt.ylabel('Conv1')
+    plt.title(r'Norm Residual Coefficients')
+
+    for y_index, y in enumerate(y_positions):
+        for x_index, x in enumerate(x_positions):
+            label = param_noisy[y_index, x_index]
+            if label / 1000 < 1.0:      # Hundreds of Thousands
+                s = "%dK" % label
+            elif label / 1000 > 1.0:    # Millions
+                s = "%.1fM" % (label / 1000)
+
+            text_x = x + jump_x
+            text_y = y + jump_y
+            plt.text(text_x, text_y, s, color='black', ha='center', va='center')
+
+    plt.show()
+
+
+    ## === ''' ### ---==
 
     # First we see whether the number of filters matters, for a constant number of layers
     layers = [[8, 4],
