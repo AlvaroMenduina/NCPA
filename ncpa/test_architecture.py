@@ -479,8 +479,8 @@ if __name__ == """__main__""":
     # Get some noisy
     N_copies = 1
     readout_copies = 3
-    # SNRs = [250, 500, 750]
-    SNRs = [50, 100, 200]
+    SNRs = [250, 500, 750]
+    # SNRs = [50, 100, 200]
     train_PSF_noisy, train_coef_noisy = [], []
     test_PSF_noisy, test_coef_noisy = [], []
     for k in range(readout_copies):
@@ -516,7 +516,7 @@ if __name__ == """__main__""":
     calib_noisy.cnn_model = best_model
 
     N_roc = 5
-    SNRs = [250, 500, 750]
+    # SNRs = [250, 500, 750]
     S = len(SNRs)
     colors_array = [cm.Reds(np.linspace(0.5, 1, N_roc)),
                     cm.Blues(np.linspace(0.5, 1, N_roc)),
@@ -618,7 +618,7 @@ if __name__ == """__main__""":
     calib_flat = calibration.Calibration(PSF_model=PSF_zernike)
     layer_filters = [32, 32]
     SNR = 500
-    calib_flat.create_cnn_model(layer_filters, kernel_size, name='FLATS', activation='relu')
+    calib_flat.create_cnn_model(layer_filters, kernel_size, name='FLATS', activation='relu', learning_rate=1e-3)
     # noisy_train = calib_flat.noise_effects.add_readout_noise(train_PSF, RMS_READ=1 / SNR)
     losses = calib_flat.train_calibration_model(train_PSF, train_coef,
                                                 test_PSF, test_coef,
@@ -654,8 +654,7 @@ if __name__ == """__main__""":
         return flat_images
 
 
-    noisy_test = calib_flat.noise_effects.add_readout_noise(test_PSF, RMS_READ=1 / SNR)
-    residual_coef0 = test_coef - calib_flat.cnn_model.predict(noisy_test)
+    residual_coef0 = test_coef - calib_flat.cnn_model.predict(test_PSF)
     norm_res0 = np.mean(norm(residual_coef0, axis=1))
 
     flat_devs = np.linspace(1e-3, 25, 100) / 100
@@ -670,8 +669,6 @@ if __name__ == """__main__""":
         test_PSF_flat_uniform = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
         test_PSF_flat_gaussian2sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=2)
         test_PSF_flat_gaussian3sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=3)
-
-        test_PSF_flat_uniform = calib_flat.noise_effects.add_readout_noise(test_PSF_flat_uniform, RMS_READ=1 / SNR)
 
         residual_coef_uniform = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
         norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
@@ -765,6 +762,141 @@ if __name__ == """__main__""":
         ax.grid(True)
         ax.set_xlim([0, 25])
     # plt.ylim(bottom=0)
+    plt.show()
+
+    # spatially correlated noise
+    max_dev = 0.10
+    flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+    std_flat = np.std(flat)
+    x0 = np.linspace(-1, 1, pix)
+    xx, yy = np.meshgrid(x0, x0)
+    a, b, c, d, e = np.random.uniform(low=-1, high=1, size=5)
+    z = a * xx **2 + b * yy **2 + c * xx * yy + d * xx + e * yy
+    z -= np.mean(z)
+    z_max = max(-np.min(z), np.max(z))
+    # Normalize to +- 1.0
+    z /= (z_max)
+
+    z *= max_dev
+
+    noise = flat + z
+
+    # std_noise = np.std(noise)
+    # noise = noise / std_noise * std_flat
+
+    fig, axes = plt.subplots(1, 3)
+    data = [flat, z, noise]
+    imgs = []
+    for i in range(3):
+        ax = axes[i]
+        img = ax.imshow(data[i], cmap='Reds', origin='lower')
+        imgs.append(img)
+        plt.colorbar(img, ax=ax, orientation='horizontal')
+        ax.set_xlabel('Pixel')
+        ax.set_ylabel('Pixel')
+
+    axes[0].set_title(r'Base Flat Field U$\left[1-\Delta, 1+\Delta \right]$')
+    axes[1].set_title(r'Spatially Correlated Term')
+    axes[2].set_title(r'Combined Flat Field')
+
+    imgs[0].set_clim(1-max_dev, 1+max_dev)
+    imgs[1].set_clim(-max_dev, max_dev)
+    imgs[2].set_clim(np.min(noise), np.max(noise))
+    # ax3.set_title('Mean: %.2f | Std: %.2f' % (np.mean(noise), np.std(noise)))
+    plt.show()
+
+    def add_spatial_flat_field(test_images, max_dev=0.10, noise='Uniform', sigma=1):
+
+        N_PSF = test_images.shape[0]
+        pix = test_images.shape[1]
+        flat_images = np.zeros_like(test_images)
+
+        # Spatially correlated component
+        x0 = np.linspace(-1, 1, pix)
+        xx, yy = np.meshgrid(x0, x0)
+
+        for k in range(N_PSF):
+
+            psf_nom = test_images[k, :, :, 0]
+            psf_foc = test_images[k, :, :, 1]
+
+            # flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+            # flat_foc = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+
+            if noise == "Uniform":
+                flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+                # flat_foc = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+            elif noise == "Gaussian":
+                flat = np.random.normal(loc=1, scale=max_dev / sigma, size=(pix, pix))
+                # flat_foc = np.random.normal(loc=1, scale=max_dev / sigma, size=(pix, pix))
+            # flat_foc = np.random.normal(loc=1, scale=max_dev/3, size=(pix, pix))
+
+            # Spatially correlated
+            a, b, c, d, e = np.random.uniform(low=-1, high=1, size=5)
+            z = a * xx ** 2 + b * yy ** 2 + c * xx * yy + d * xx + e * yy
+            z -= np.mean(z)
+            z_max = max(-np.min(z), np.max(z))
+            # Normalize to +- 1.0
+            z /= (z_max)
+
+            z *= max_dev
+            noise = flat + z
+            # if k == 0:
+            #     plt.figure()
+            #     plt.imshow(noise, cmap='Reds')
+            #     plt.colorbar()
+
+
+            flat_images[k, :, :, 0] = noise * psf_nom
+            flat_images[k, :, :, 1] = noise * psf_foc
+
+        return flat_images
+
+
+    residual_coef0 = test_coef - calib_flat.cnn_model.predict(test_PSF)
+    norm_res0 = np.mean(norm(residual_coef0, axis=1))
+
+    flat_devs = np.linspace(1e-3, 15, 200) / 100
+    N_flats = flat_devs.shape[0]
+
+    norms_flat_uniform = np.zeros(N_flats)
+    norms_flat_uniform_spa = np.zeros(N_flats)
+    # norms_flat_gaussian2sig = np.zeros(N_flats)
+    # norms_flat_gaussian3sig = np.zeros(N_flats)
+
+    for k in range(N_flats):
+
+        test_PSF_flat_uniform = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
+        test_PSF_flat_uniform_spa = add_spatial_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
+        # test_PSF_flat_gaussian2sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=2)
+        # test_PSF_flat_gaussian3sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=3)
+
+        residual_coef_uniform = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
+        norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
+        norms_flat_uniform[k] = (norm_res_uniform / norm_res0 - 1) * 100
+
+        residual_coef_uniform = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform_spa)
+        norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
+        norms_flat_uniform_spa[k] = (norm_res_uniform / norm_res0 - 1) * 100
+
+
+    colors = cm.Blues(np.linspace(0.5, 1, 2))
+    s = 10
+    plt.figure()
+    # for i in range(2):
+    plt.scatter(flat_devs * 100, norms_flat_uniform, label=r'Uniform',
+                color=colors[0], s=s)
+    plt.scatter(flat_devs * 100, norms_flat_uniform_spa, label=r'Spatially Correlated',
+                color=colors[1], s=s)
+
+    plt.xlabel(r'Flat Uncertainty $\Delta$ [percent]')
+    plt.ylabel(r'Change in Residual Norm [percent]')
+    plt.legend(title='Flat Field Model')
+    plt.grid(True)
+    plt.xlim([0, 15])
+    plt.ylim(bottom=0)
+    plt.xticks(np.arange(0, 16, 1))
+    # plt.ylim([0, 5])
     plt.show()
 
     # ================================================================================================================ #
