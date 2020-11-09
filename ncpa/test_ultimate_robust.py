@@ -61,7 +61,6 @@ class RealisticPSF(object):
         self.diversity_errors = effects_dict['DEFOCUS_ERRORS']        # Whether to account for Diversity errors
         self.anamorphic_errors = effects_dict['ANAMORPHIC_ERRORS']        # Whether to account for Diversity errors
 
-
         return
 
     def define_nominal_PSF_model(self):
@@ -198,7 +197,6 @@ class RealisticPSF(object):
         return dataset[:N_train], coefs[:N_train], dataset[N_train:], coefs[N_train:], errors
 
     def update_PSF_images(self, coef, errors_array):
-
 
         N_PSF = coef.shape[0]
         new_PSF = np.zeros((N_PSF, self.pix, self.pix, 2))

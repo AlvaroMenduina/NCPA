@@ -653,6 +653,174 @@ if __name__ == """__main__""":
 
         return flat_images
 
+    # Check possible correlation between the starting Strehl ratio and the impact of flat field
+    max_dev = 0.10
+
+    N_figs = 5
+    fig, axes = plt.subplots(2, 5)
+    for k in range(N_figs):
+
+        flat = np.random.uniform(low=1 - max_dev, high=1 + max_dev, size=(pix, pix))
+        p0 = train_PSF[k, :, :, 0]
+        s0 = np.max(p0)
+        pf = train_PSF[-k -1, :, :, 0]
+        sf = np.max(pf)
+
+        img0 = p0 - p0 * flat
+        c0 = max(-np.min(img0), np.max(img0))
+
+        imgf = pf - pf * flat
+        cf = max(-np.min(imgf), np.max(imgf))
+
+        ax1 = axes[0][k]
+        img1 = ax1.imshow(img0, cmap='bwr')
+        img1.set_clim(-c0, c0)
+        plt.colorbar(img1, ax=ax1, orientation='horizontal')
+        ax1.set_title(r'PSF #%d | Strehl %.2f' % (k + 1, s0))
+
+        ax2 = axes[1][k]
+        img2 = ax2.imshow(imgf, cmap='bwr')
+        img2.set_clim(-cf, cf)
+        plt.colorbar(img2, ax=ax2, orientation='horizontal')
+        ax2.set_title(r'PSF #%d | Strehl %.2f' % (N_train - k, sf))
+
+    plt.show()
+
+    # We generate a test set with at least 10k images to really get an idea of what's going on
+    N = 10000
+    _p, _c, new_test_PSF, new_test_coef = calibration.generate_dataset(PSF_zernike, 0, N, coef_strength, rescale)
+
+    # Calculate the initial Strehl ratios. we want to see if the original Strehl correlates with a bad response to flat errors
+    peaks_test = np.max(new_test_PSF[:, :, :, 0], axis=(1, 2))
+    cc = cm.Reds(peaks_test[::-1])          # flip it so we have the Red at low Strehl and get a cooler plot
+    devs = np.array([0.01, 0.05, 0.10])
+    N_devs = devs.shape[0]
+
+    # First we calculate the nominal performance. What is the residual when test on "CLEAN" images
+    residual_coef0 = new_test_coef - calib_flat.cnn_model.predict(new_test_PSF)
+    norm_nom = norm(residual_coef0, axis=1)
+
+    # Calculate the Strehl ratio after correction
+    strehl_nominal = np.zeros(N)
+    for i in range(N):
+        if i % 500 == 0:
+            print(i)
+        psf_nom, s_nom = PSF_zernike.compute_PSF(residual_coef0[i])
+        strehl_nominal[i] = s_nom
+
+    # Now for each value of Flat Field error, we calculate the Strehl after correction
+    # and compare it to the Strehl for the nominal case, see if it's higher or lower.
+    strehl_diffs = np.zeros((N_devs, N))
+
+    for k in range(N_devs):
+
+        # First we add the Flat Field to the PSF images
+        test_PSF_flat_uniform = add_flat_field(new_test_PSF, max_dev=devs[k], noise='Uniform')
+        # We predict the aberrations and apply the correction
+        residual_coef_uniform = new_test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
+        # norm_uni = norm(residual_coef_uniform, axis=1)
+
+        # We update the Strehl ratio
+        strehl_flat = np.zeros(N)
+        for i in range(N):
+            if i % 500 == 0:
+                print(i)
+            psf_flat, s_flat = PSF_zernike.compute_PSF(residual_coef_uniform[i])
+            strehl_flat[i] = s_flat
+
+        # And calculate the difference
+        diff_strehl = strehl_flat - strehl_nominal
+        strehl_diffs[k] = diff_strehl
+        # diff_norm = (norm_uni - norm_nom) / norm_nom * 100
+
+    fig, axes = plt.subplots(1, N_devs + 1, figsize=(20, 5))
+    ax = axes[0]
+    ax.scatter(peaks_test * 100, strehl_nominal * 100, color=cc, s=3, label=r'Nominal')
+    ax.set_ylim([0, 100])
+    ax.set_xlim([0, 100])
+    ax.set_xticks(np.arange(0, 110, 10))
+    ax.set_xlabel(r'Initial Strehl ratio')
+    ax.set_ylabel(r'Corrected Strehl ratio')
+    # ax.legend(title='Flat Field', loc=4)
+    ax.set_title(r"Nominal Model")
+    for k in range(N_devs):
+        data = strehl_diffs[k] * 100
+        cmax = max(-np.min(data), np.max(data))
+        worse = np.sum(data < 0.0) / N
+        ax = axes[k + 1]
+        ax.fill_between(x=[0, 100], y1=-1.1*cmax, y2=0.0, color='orange', alpha=0.5)
+        # ax.fill_between(x=[0, 1], y1=0, y2=1.1*cmax, color='lightgreen', alpha=0.5)
+        ax.scatter(peaks_test * 100, data, color=cc, s=3, label=r'$\Delta = %.1f$ pc' % (100*devs[k]))
+        ax.axhline(0, linestyle='-.', color='k')
+        ax.set_ylim([-1.1*cmax, 1.1*cmax])
+        ax.set_xlim([0, 100])
+        ax.set_xticks(np.arange(0, 110, 10))
+        ax.set_xlabel(r'Initial Strehl ratio')
+        ax.legend(title='Flat Field', loc=4)
+        ax.set_title(r"Samples with worse Strehl: %d percent" % worse)
+        if k == 0:
+            ax.set_ylabel(r'Change in Strehl')
+
+    # Why are some of the predictions better when there is flat field?
+
+    # Iterate
+
+    # plt.plot(range(N_iter_flat + 1), strehl_iter)
+
+    j_example = 0
+    N_trials = 20
+    N_iter_flat = 3
+    N = 100
+    strehl_data = np.zeros((N_iter_flat, N_trials, N))
+    for i in range(N):
+        for j in range(N_trials):
+
+            test_image = new_test_PSF[i:i + 1]
+            coef_image = new_test_coef[i:i + 1]
+
+            # strehl_iter = [np.max(test_image[0, :, :, 0], axis=(0, 1))]
+            test_image = add_flat_field(test_image, max_dev=0.10, noise='Uniform')
+            for k in range(N_iter_flat):
+                r = coef_image - calib_flat.cnn_model.predict(test_image)
+                new_image = np.zeros_like(test_image)
+                psf_nom, s_ = PSF_zernike.compute_PSF(r[0])
+                strehl_data[k, j, i] = s_
+                # strehl_iter.append(s_)
+                psf_foc, s__ = PSF_zernike.compute_PSF(r[0], diversity=True)
+                new_image[0, :, :, 0] = psf_nom
+                new_image[0, :, :, 1] = psf_foc
+                new_image = add_flat_field(new_image, max_dev=0.10, noise='Uniform')
+                test_image = new_image
+                coef_image = r
+        # strehl_iter = np.array(strehl_iter)
+        # plt.plot(range(N_iter_flat + 1), strehl_iter, color='red')
+
+
+    import seaborn as sns
+    import pandas as pd
+
+    strehl_data = strehl_data.reshape((N_iter_flat, -1))
+    data = pd.DataFrame(strehl_data.T, columns=range(N_iter_flat))
+
+    # Violinplot
+    fig_violin, ax = plt.subplots(1, 1)
+    sns.violinplot(data=data, ax=ax, hue_order=range(N_iter_flat), palette=sns.color_palette("Reds"))
+    plt.show()
+
+
+    # First we add the Flat Field to the PSF images
+    test_PSF_flat_uniform = add_flat_field(new_test_PSF, max_dev=devs[k], noise='Uniform')
+    # We predict the aberrations and apply the correction
+    residual_coef_uniform = new_test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
+    # norm_uni = norm(residual_coef_uniform, axis=1)
+
+    # We update the Strehl ratio
+    strehl_flat = np.zeros(N)
+    for i in range(N):
+        if i % 500 == 0:
+            print(i)
+        psf_flat, s_flat = PSF_zernike.compute_PSF(residual_coef_uniform[i])
+        strehl_flat[i] = s_flat
 
     residual_coef0 = test_coef - calib_flat.cnn_model.predict(test_PSF)
     norm_res0 = np.mean(norm(residual_coef0, axis=1))
