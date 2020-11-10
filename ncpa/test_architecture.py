@@ -822,25 +822,68 @@ if __name__ == """__main__""":
         psf_flat, s_flat = PSF_zernike.compute_PSF(residual_coef_uniform[i])
         strehl_flat[i] = s_flat
 
-    residual_coef0 = test_coef - calib_flat.cnn_model.predict(test_PSF)
-    norm_res0 = np.mean(norm(residual_coef0, axis=1))
+    guess0 = calib_flat.cnn_model.predict(new_test_PSF)
+    norm_guess0 = norm(guess0, axis=1)
+    residual_coef0 = new_test_coef - guess0
+    norm0 = norm(residual_coef0, axis=1)
+    # norm_res0 = np.mean(norm(residual_coef0, axis=1))
 
-    flat_devs = np.linspace(1e-3, 25, 100) / 100
+    import matplotlib.mlab as mlab
+    # flat_devs = np.linspace(1e-3, 25, 10) / 100
+    flat_devs = np.array([0.01, 0.05, 0.10])
     N_flats = flat_devs.shape[0]
+    colors = cm.Reds(np.linspace(0.5, 0.85, N_flats))
 
-    norms_flat_uniform = np.zeros(N_flats)
+    N_times = 1
+    norms_flat_uniform = np.zeros((N_flats, N_times * N))
     norms_flat_gaussian2sig = np.zeros(N_flats)
     norms_flat_gaussian3sig = np.zeros(N_flats)
 
+    nbins = 50
+    fig, axes = plt.subplots(1, N_flats + 1, figsize=(20, 5))
+    ax = axes[0]
+    ax.hist(norm0, bins=nbins, color='lightblue', density=True)
+    ax.set_title(r'Norm Residual Coeff.')
+    ax.set_xlabel(r'Norm $\eta(x)$ [$\lambda$]')
+    ax.set_ylabel(r'PDF [ ]')
+    ax.set_xlim(left=0)
+    ax.set_yticks([])
+
     for k in range(N_flats):
 
-        test_PSF_flat_uniform = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Uniform')
-        test_PSF_flat_gaussian2sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=2)
-        test_PSF_flat_gaussian3sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=3)
+        for i in range(N_times):
+            print(i)
+            test_PSF_flat_uniform = add_flat_field(new_test_PSF, max_dev=flat_devs[k], noise='Uniform')
+            # test_PSF_flat_uniform = add_spatial_flat_field(new_test_PSF, max_dev=flat_devs[k], noise='Uniform')
+            # test_PSF_flat_gaussian2sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=2)
+            # test_PSF_flat_gaussian3sig = add_flat_field(test_PSF, max_dev=flat_devs[k], noise='Gaussian', sigma=3)
 
-        residual_coef_uniform = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_uniform)
-        norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
-        norms_flat_uniform[k] = (norm_res_uniform / norm_res0 - 1) * 100
+            guess_uniform = calib_flat.cnn_model.predict(test_PSF_flat_uniform)
+            norm_uni = norm(guess_uniform, axis=1)
+            print(np.mean(norm_uni))
+            residual_coef_uniform = new_test_coef - guess_uniform
+            norm_res_uniform = norm(residual_coef_uniform, axis=1)
+            # norm_res_uniform = np.mean(norm(residual_coef_uniform, axis=1))
+            # norms_flat_uniform[k] = (norm_res_uniform / norm_res0 - 1) * 100
+            # norms_flat_uniform[k, i*N: (i+1)*N] = (norm_res_uniform / norm0 - 1) * 100
+            norms_flat_uniform[k, i*N: (i+1)*N] = (norm_res_uniform - norm0)
+
+        mu, sigma = gaussian.fit(norms_flat_uniform[k])
+        label = r"$\mu$ = %.1e, $\sigma$ = %.1e" % (mu, sigma)
+
+        ax = axes[k + 1]
+        n, bins, patches = ax.hist(norms_flat_uniform[k], bins=nbins, density=True, color=colors[k], label=label)
+
+        y = mlab.normpdf(bins, mu, sigma)
+        l = ax.plot(bins, y, 'k-.', linewidth=1, alpha=0.75)
+
+        ax.set_title(r'Flat Field error $\Delta$ = $\pm$%.1f percent' % (100 * flat_devs[k]))
+        ax.set_xlabel(r'Norm Change $\Delta \eta$ [$\lambda$]')
+        ax.set_ylabel(r'PDF [ ]')
+        ax.legend(title=r"Gaussian Fit", loc=3)
+        ax.set_yticks([])
+
+    plt.show()
 
         residual_coef_gaussian = test_coef - calib_flat.cnn_model.predict(test_PSF_flat_gaussian2sig)
         norm_res_gaussian = np.mean(norm(residual_coef_gaussian, axis=1))
