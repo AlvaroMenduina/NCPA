@@ -226,7 +226,7 @@ def actuator_matrix_multiwave(centres, alpha_pc, rho_aper, rho_obsc,
     return matrices
 
 
-def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, anamorphic_ratio=1.0):
+def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, anamorphic_ratio=1.0, theta_shift=None):
     """
     Equivalent of actuator_matrix but for a Zernike wavefront model
     It computes the Zernike Model Matrix [N_PIX, N_PIX, N_ZERN]
@@ -254,6 +254,10 @@ def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, ana
     pupil = (rho <= rho_aper) & (rho >= rho_obsc)
 
     rho, theta = rho[pupil], theta[pupil]
+
+    if theta_shift is not None:
+        theta += theta_shift
+
     zernike = zern.ZernikeNaive(mask=pupil)
     _phase = zernike(coef=np.zeros(N_zern), rho=rho / (radial_oversize * rho_aper), theta=theta, normalize_noll=False,
                      mode='Jacobi', print_option='Silent')

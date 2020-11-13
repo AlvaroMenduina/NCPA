@@ -14,6 +14,7 @@ to include the effects of actuators -> pupil mapping errors
 
 import numpy as np
 from numpy.linalg import norm
+from matplotlib import cm
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import seaborn as sns
@@ -58,7 +59,7 @@ if __name__ == """__main__""":
     # (1) We begin by creating a Zernike PSF model with Defocus as diversity
     zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
-                                                                          N_PIX=N_PIX, radial_oversize=1.1)
+                                                                          N_PIX=N_PIX, radial_oversize=1)
     N_zern = zernike_matrix.shape[-1]
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
     PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=N_PIX,
@@ -347,6 +348,215 @@ if __name__ == """__main__""":
     print("RMS before calibration: %.4f +- %.4f rad" % (np.mean(RMS0), np.std(RMS0)))
     print("Zernike Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_zern), np.std(RMS_zern)))
     print("Actuator Model: RMS after calibration: %.4f +- %.4f rad" % (np.mean(RMS_actu), np.std(RMS_actu)))
+
+    # ================================================================================================================ #
+    #                             Impact of Zernike misalignments in the correction
+    # ================================================================================================================ #
+
+    # Create a Zernike matrix with an angular misaligment
+    # we will use this to apply "bad corrections"
+    theta_shift = np.deg2rad(15)
+    angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                          radial_oversize=1, theta_shift=theta_shift)
+    zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
+
+    PSF_zernike_angular = psf.PointSpreadFunction(matrices=angular_matrices, N_pix=N_PIX, crop_pix=pix,
+                                                  diversity_coef=defocus_zernike[0])
+
+    x = np.linspace(-1, 1, 10)
+    y = np.zeros(10)
+    dx = x * np.cos(theta_shift) - y * np.sin(theta_shift)
+    dy = x * np.sin(theta_shift) + y * np.cos(theta_shift)
+
+    # theta_diff = np.deg2rad(90 - 45 /3)
+    # dx_diff = x * np.cos(theta_diff) - y * np.sin(theta_diff)
+    # dy_diff = x * np.sin(theta_diff) + y * np.cos(theta_diff)
+
+    cmap = 'jet'
+    extent = [-1, 1, -1, 1]
+    N_col = 5
+    fig, axes = plt.subplots(3, N_col)
+    for k in range(N_col):
+        phase_normal = zernike_matrix[:, :, k]
+        phase_angle = zernike_matrix_angular[:, :, k]
+        diff = phase_angle - phase_normal
+
+        ax1 = axes[0][k]
+        img1 = ax1.imshow(phase_normal, cmap=cmap, origin='lower', extent=extent)
+        img1.set_clim(-1, 1)
+        plt.colorbar(img1, ax=ax1, orientation='horizontal')
+        ax1.plot(x, y, color='black', linestyle='--', alpha=0.5)
+        ax1.set_xlim([-RHO_APER, RHO_APER])
+        ax1.set_ylim([-RHO_APER, RHO_APER])
+
+
+        ax2 = axes[1][k]
+        img2 = ax2.imshow(phase_angle, cmap=cmap, origin='lower', extent=extent)
+        img2.set_clim(-1, 1)
+        plt.colorbar(img2, ax=ax2, orientation='horizontal')
+        ax2.plot(x, y, color='black', linestyle='--', alpha=0.5)
+        ax2.plot(dx, dy, color='black', linestyle='-.')
+        ax2.set_xlim([-RHO_APER, RHO_APER])
+        ax2.set_ylim([-RHO_APER, RHO_APER])
+
+        ax3 = axes[2][k]
+        img3 = ax3.imshow(diff, cmap=cmap, origin='lower', extent=extent)
+        # img3.set_clim(-1, 1)
+        plt.colorbar(img3, ax=ax3, orientation='horizontal')
+        ax3.plot(x, y, color='black', linestyle='--', alpha=0.5)
+        ax3.plot(dx, dy, color='black', linestyle='-.')
+        # ax3.plot(dx_diff, dy_diff, color='red', linestyle='-.')
+        ax3.set_xlim([-RHO_APER, RHO_APER])
+        ax3.set_ylim([-RHO_APER, RHO_APER])
+
+        if k == 0:
+            ax1.set_ylabel('Nominal')
+            ax2.set_ylabel('15 deg rotation')
+            ax3.set_ylabel('Difference')
+
+    for ax in axes.flatten():
+        ax.set_xticks([])
+        ax.set_yticks([])
+        # ax.yaxis.set_visible(False)
+
+    plt.show()
+
+
+    N_aberr = 33
+    N_theta = 360
+    theta_shift = np.linspace(0, N_theta, N_theta)
+    pv_resi = np.zeros((N_aberr, N_theta))
+    rms_resi = np.zeros((N_aberr, N_theta))
+    for k in range(N_theta):
+        t_shift = np.deg2rad(theta_shift[k])
+        angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                              radial_oversize=1, theta_shift=t_shift)
+        zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
+
+        for j in range(N_aberr):
+            phase_normal = zernike_matrix[:, :, j]
+            rms_normal = np.std(phase_normal[pupil_mask_zernike])
+            phase_angle = zernike_matrix_angular[:, :, j]
+            diff = phase_angle - phase_normal
+            rms_angle = np.std(diff[pupil_mask_zernike])
+            pv_resi[j, k] = (np.max(diff) - np.min(diff)) / 2
+            rms_resi[j, k] = rms_angle / rms_normal
+
+
+    idx = [4, 0, 3, 7]
+    colors = cm.coolwarm(np.linspace(0, 1.0, len(idx)))
+    labels = ['Coma', 'Astigmatism', 'Trefoil',  'Quatrefoil']
+    linestyles = ['solid', 'dotted', 'dashed', 'dashdot']
+    plt.figure()
+    for j, lab, col, ls in zip(idx, labels, colors, linestyles):
+        plt.plot(theta_shift, rms_resi[j], label=lab, color=col, linestyle=ls)
+    plt.legend(title=r'Zernike Aberration', loc=4)
+    plt.ylabel(r'Residual RMS ratio')
+    plt.xlabel(r'Misalignment [deg]')
+    plt.ylim([0, 2])
+    plt.xlim([0, N_theta])
+    plt.show()
+
+
+    plt.figure()
+    derivatives = []
+    for j, lab, col in zip(idx, labels, colors):
+        plt.plot(theta_shift, rms_resi[j], label=lab, color=col)
+        der = (rms_resi[j, 10]) / (theta_shift[10] - theta_shift[0])
+        derivatives.append(der)
+        print(der)
+    plt.legend(title=r'Zernike Aberration', loc=4)
+    plt.ylabel(r'Residual RMS ratio')
+    plt.xlabel(r'Misalignment [deg]')
+    plt.ylim([0, 1])
+    plt.xlim([0, 25])
+    plt.grid(True)
+    plt.show()
+
+    der_vector = np.zeros(N_aberr)
+    for j in range(N_aberr):
+        der_vector[j] = (rms_resi[j, 10]) / (theta_shift[10] - theta_shift[0])
+    max_idx = [3, 7, 12, 18, 25, 33]
+    for max_k in max_idx:
+        print(norm(der_vector[:max_k]))
+
+
+    N_samples = 1
+    N_theta = 200
+    theta_shift_rand = np.linspace(0, 25, N_theta)
+    rms_errors = np.zeros((N_samples, N_theta))
+    rms_errors_beta = np.zeros((N_samples, N_theta))
+    beta = 0.75
+    for k in range(N_theta):
+        t_shift = np.deg2rad(theta_shift_rand[k])
+        angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                              radial_oversize=1, theta_shift=t_shift)
+        zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
+
+        for j in range(N_samples):
+            coef0 = np.random.uniform(low=-1, high=1, size=N_zern)
+            ratio = np.logspace(0, -1, N_zern)
+            coef0 *= ratio
+            phase_normal = np.dot(zernike_matrix, coef0)
+            rms_normal = np.std(phase_normal[pupil_mask_zernike])
+
+            phase_angle = np.dot(zernike_matrix_angular, coef0)
+            diff = phase_normal - phase_angle
+            rms_angle = np.std(diff[pupil_mask_zernike])
+            rms_errors[j, k] = rms_angle / rms_normal
+
+            diff_beta = phase_normal - beta * phase_angle
+            rms_angle_beta = np.std(diff_beta[pupil_mask_zernike])
+            rms_errors_beta[j, k] = rms_angle_beta / rms_normal
+
+
+    idx = [4, 0, 3, 7]
+    colors = cm.coolwarm(np.linspace(0, 1.0, len(idx)))
+    labels = ['Coma', 'Astigmatism', 'Trefoil',  'Quatrefoil']
+    linestyles = ['solid', 'dotted', 'dashed', 'dashdot']
+    fig, (ax1, ax2) = plt.subplots(2, 1)
+    for j, lab, col, ls in zip(idx, labels, colors, linestyles):
+        ax1.plot(theta_shift, rms_resi[j], label=lab, color=col, linestyle=ls)
+    ax1.legend(title=r'Zernike Aberration', loc=4)
+    ax1.set_xticks([])
+
+    for j in range(N_samples):
+        ax2.scatter(theta_shift_rand, rms_errors[j], s=3, color='black')
+    ax2.set_xlabel(r'Misalignment [deg]')
+
+    for ax in [ax1, ax2]:
+        ax.set_ylabel(r'Residual RMS ratio')
+
+        ax.set_ylim([0, 2])
+        ax.set_xlim([0, 360])
+    # plt.show()
+    plt.show()
+
+    ###
+    plt.figure()
+    derivatives = []
+    for j, lab, col in zip(idx, labels, colors):
+        plt.plot(theta_shift, rms_resi[j], label=lab, color=col)
+        der = (rms_resi[j, 10]) / (theta_shift[10] - theta_shift[0])
+        derivatives.append(der)
+        print(der)
+    for j in range(N_samples):
+        plt.scatter(theta_shift_rand, rms_errors[j], s=3, color='black', label=r'Random $\beta=1$')
+        plt.scatter(theta_shift_rand, rms_errors_beta[j], s=3, color='red', label=r'Random $\beta=%.2f$' % beta)
+    plt.legend(title=r'Zernike Aberration', loc=4)
+    plt.ylabel(r'Residual RMS ratio')
+    plt.xlabel(r'Misalignment [deg]')
+    plt.ylim([0, 1])
+    plt.xlim([0, 25])
+    plt.grid(True)
+    plt.show()
+
+
+
+
+
+
+
 
     # ================================================================================================================ #
     #                             Impact of Actuator -> Pupil Mapping errors
