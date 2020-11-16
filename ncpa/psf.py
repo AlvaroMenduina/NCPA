@@ -226,7 +226,8 @@ def actuator_matrix_multiwave(centres, alpha_pc, rho_aper, rho_obsc,
     return matrices
 
 
-def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, anamorphic_ratio=1.0, theta_shift=None):
+def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, anamorphic_ratio=1.0,
+                   x_shift=None, theta_shift=None):
     """
     Equivalent of actuator_matrix but for a Zernike wavefront model
     It computes the Zernike Model Matrix [N_PIX, N_PIX, N_ZERN]
@@ -250,8 +251,13 @@ def zernike_matrix(N_levels, rho_aper, rho_obsc, N_PIX, radial_oversize=1.0, ana
     # eccentricity
     a = 1.0
     b = a / anamorphic_ratio
-    rho, theta = np.sqrt((xx / a) ** 2 + (yy / b) ** 2), np.arctan2(xx, yy)
-    pupil = (rho <= rho_aper) & (rho >= rho_obsc)
+    if x_shift is None:
+        rho, theta = np.sqrt((xx / a) ** 2 + (yy / b) ** 2), np.arctan2(xx, yy)
+        pupil = (rho <= rho_aper) & (rho >= rho_obsc)
+    else:
+        r0 = np.sqrt((xx / a) ** 2 + (yy / b) ** 2)
+        pupil = (r0 <= rho_aper) & (r0 >= rho_obsc)
+        rho, theta = np.sqrt(((xx - x_shift[0])/ a) ** 2 + ((yy - x_shift[1])/ b) ** 2), np.arctan2(xx - x_shift[0], yy - x_shift[1])
 
     rho, theta = rho[pupil], theta[pupil]
 

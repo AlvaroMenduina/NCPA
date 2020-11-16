@@ -14,6 +14,7 @@ to include the effects of actuators -> pupil mapping errors
 
 import numpy as np
 from numpy.linalg import norm
+from numpy.fft import fftshift, fft2
 from matplotlib import cm
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -43,12 +44,151 @@ N_levels = 10                       # How many Zernike radial orders
 
 # Machine Learning bits
 N_train, N_test = 10000, 1000       # Samples for the training of the models
-coef_strength = 1 / (2 * np.pi)     # Strength of the actuator coefficients
+coef_strength = 1.2 / (2 * np.pi)     # Strength of the actuator coefficients
 rescale = 0.35                      # Rescale the coefficients to cover a wide range of RMS
 layer_filters = [128, 64, 32]    # How many filters per layer
 kernel_size = 3
 input_shape = (pix, pix, 2,)
 epochs = 50                         # Training epochs
+
+
+def calculate_strehl(PSF_model, coeff):
+    """
+    Evaluate the Strehl ratio for a given PSF model
+    and a set of aberration coefficients
+    :param PSF_model:
+    :param coeff:
+    :return:
+    """
+    N_PSF = coeff.shape[0]
+    strehl = np.zeros(N_PSF)
+
+    for j in range(N_PSF):
+
+        _p, s = PSF_model.compute_PSF(coeff[j])
+        strehl[j] = s
+
+    return strehl
+
+
+def compute_PSF_phase(PSF_model, phase, diversity=False):
+    """
+    If the residual phase cannot be described with aberration coefficients,
+    for instance because we have subtracted a shifted wavefront, we have to
+    override the PSF calculation to directly use the wavefront map
+
+    :param PSF_model:
+    :param phase:
+    :param diversity:
+    :return:
+    """
+
+    phase0 = phase
+    if diversity:
+        phase0 += PSF_model.diversity_phase
+
+    pupil_function = PSF_model.pupil_mask * np.exp(1j * 2 * np.pi * phase0)
+    image = (np.abs(fftshift(fft2(pupil_function)))) ** 2
+    image /= PSF_model.PEAK
+
+    image = image[PSF_model.minPix:PSF_model.maxPix, PSF_model.minPix:PSF_model.maxPix]
+
+    return image
+
+
+def calibrate_iterations_shift(calib_model, PSF_model, PSF_model_shift, test_images, test_coef, N_iter, beta=1.0,
+                               noise=False, cmap='RdBu'):
+
+    coef0 = test_coef
+    # we begin by calculating the wavefronts
+    RMS0 = np.zeros(N_test)
+    wave0 = np.zeros((N_test, N_PIX, N_PIX))
+    for k in range(N_test):
+        wave0[k] = np.dot(PSF_model.model_matrix, coef0[k])
+        RMS0[k] = np.std(wave0[k][PSF_model.pupil_mask])
+
+    wavefronts = np.zeros((N_iter + 1, N_test, N_PIX, N_PIX))
+    wavefronts[0] = wave0
+
+    # s0 = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
+    s0 = np.max(test_images[:, :, :, 0], axis=(1, 2))
+    strehl_evolution = [s0]
+    RMS_evolution = [RMS0]
+
+    fig, axes = plt.subplots(N_iter, 3)
+
+    for j in range(N_iter):
+
+        rbefore = np.std(wave0[0][PSF_model.pupil_mask])
+        ax1 = axes[j][0]
+        img1 = ax1.imshow(wave0[0], cmap=cmap, extent=extent)
+        plt.colorbar(img1, ax=ax1)
+        ax1.set_title(r'Wavefront Before | RMS: %.3f $\lambda$' % rbefore)
+        ax1.set_ylabel(r'Iteration #%d' % (j + 1))
+
+        print("\nIteration #%d" % (j + 1))
+        # (1) We begin by predicting the aberrations.
+        guess = calib_model.cnn_model.predict(test_images)
+
+        # (2) The residual wavefront is given by: the nominal WF we had, minus the "shifted" correction
+        new_PSF = np.zeros((N_test, pix, pix, 2))
+        new_wave = np.zeros((N_test, N_PIX, N_PIX))
+        RMS_after = np.zeros(N_test)
+        for k in range(N_test):
+            wavef_before = wave0[k]
+
+            # This is the KEY part. We apply a wavefront correction with the "SHIFTED" actuator model
+            # so the correction will be slightly wrong, compared to what we think are doing
+            bad_correction = beta * np.dot(PSF_model_shift.model_matrix, guess[k])
+            bad_residual = wavef_before - bad_correction
+            new_wave[k] = bad_residual
+            RMS_after[k] = np.std(bad_residual[PSF_model.pupil_mask])
+
+            if k == 0:
+                ax2 = axes[j][1]
+                img2 = ax2.imshow(bad_correction, cmap=cmap, extent=extent)
+                plt.colorbar(img2, ax=ax2)
+                ax2.set_title(r'Correction #%d' % (j+1))
+                cval_corr = max(-np.min(bad_correction), np.max(bad_correction))
+                cval_wave = max(-np.min(wave0[0]), np.max(wave0[0]))
+                cval = max(cval_corr, cval_wave)
+
+                rafter = np.std(bad_residual[PSF_model.pupil_mask])
+                ax3 = axes[j][2]
+                img3 = ax3.imshow(bad_residual, cmap=cmap, extent=extent)
+                plt.colorbar(img3, ax=ax3)
+                ax3.set_title(r'Residual Wavefront %.3f $\lambda$' % rafter)
+
+                img1.set_clim(-cval, cval)
+                img2.set_clim(-cval, cval)
+                img3.set_clim(-cval, cval)
+
+                for ax in axes[j]:
+                    ax.xaxis.set_visible(False)
+                    ax.yaxis.set_visible(False)
+                    ax.set_xlim([-RHO_APER, RHO_APER])
+                    ax.set_ylim([-RHO_APER, RHO_APER])
+
+            # Update the PSF images directly with the PHASE
+            # using the residual aberrations
+            new_PSF[k, :, :, 0] = compute_PSF_phase(PSF_model, phase=bad_residual)
+            new_PSF[k, :, :, 1] = compute_PSF_phase(PSF_model, phase=bad_residual, diversity=True)
+
+            # # Update the WF as well
+            # wave0[k] = bad_residual
+
+        if noise is True:
+            test_images = calib_actuators.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR)
+        else:
+            test_images = new_PSF
+        # s = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
+        s = np.max(test_images[:, :, :, 0], axis=(1, 2))
+        strehl_evolution.append(s)
+        RMS_evolution.append(RMS_after)
+        wave0 = new_wave
+        wavefronts[j + 1] = new_wave
+
+    return wavefronts, RMS_evolution, strehl_evolution
 
 
 if __name__ == """__main__""":
@@ -59,7 +199,7 @@ if __name__ == """__main__""":
     # (1) We begin by creating a Zernike PSF model with Defocus as diversity
     zernike_matrix, pupil_mask_zernike, flat_zernike = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER,
                                                                           rho_obsc=RHO_OBSC,
-                                                                          N_PIX=N_PIX, radial_oversize=1)
+                                                                          N_PIX=N_PIX, radial_oversize=1.1)
     N_zern = zernike_matrix.shape[-1]
     zernike_matrices = [zernike_matrix, pupil_mask_zernike, flat_zernike]
     PSF_zernike = psf.PointSpreadFunction(matrices=zernike_matrices, N_pix=N_PIX,
@@ -215,7 +355,7 @@ if __name__ == """__main__""":
     plt.show()
 
     SNR = 500
-    epochs = 10
+    epochs = 5
     # Train the Calibration Model on images with the nominal defocus
     calib_zern = calibration.Calibration(PSF_model=PSF_zernike)
     calib_zern.create_cnn_model(layer_filters, kernel_size, name='NOM_ZERN', activation='relu')
@@ -353,42 +493,47 @@ if __name__ == """__main__""":
     #                             Impact of Zernike misalignments in the correction
     # ================================================================================================================ #
 
+    # What if the reference system of the Zernikes for the Deformable Mirror is not properly aligned with the
+    # reference system used to define the aberrations in the PSF?
+    # There will be a residual error when we apply the corrections
+
+    # [1] ANGULAR MISALIGNMENT - Rotation of the reference system
+
     # Create a Zernike matrix with an angular misaligment
     # we will use this to apply "bad corrections"
-    theta_shift = np.deg2rad(15)
+    theta_deg = 15
+    theta_shift = np.deg2rad(theta_deg)
     angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
-                                          radial_oversize=1, theta_shift=theta_shift)
+                                          radial_oversize=1.1, x_shift=None, theta_shift=theta_shift)
     zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
 
     PSF_zernike_angular = psf.PointSpreadFunction(matrices=angular_matrices, N_pix=N_PIX, crop_pix=pix,
                                                   diversity_coef=defocus_zernike[0])
 
+    # Now we compare the Zernike polynomials for both reference systems
+    # Draw a horizontal line for the nominal system
     x = np.linspace(-1, 1, 10)
     y = np.zeros(10)
+    # Rotate the line for the misaligned system
     dx = x * np.cos(theta_shift) - y * np.sin(theta_shift)
     dy = x * np.sin(theta_shift) + y * np.cos(theta_shift)
 
-    # theta_diff = np.deg2rad(90 - 45 /3)
-    # dx_diff = x * np.cos(theta_diff) - y * np.sin(theta_diff)
-    # dy_diff = x * np.sin(theta_diff) + y * np.cos(theta_diff)
-
+    # Show the different Zernike polynomials
     cmap = 'jet'
     extent = [-1, 1, -1, 1]
     N_col = 5
     fig, axes = plt.subplots(3, N_col)
     for k in range(N_col):
-        phase_normal = zernike_matrix[:, :, k]
-        phase_angle = zernike_matrix_angular[:, :, k]
-        diff = phase_angle - phase_normal
+
+        phase_normal = zernike_matrix[:, :, k]              # Nominal Zernike
+        phase_angle = zernike_matrix_angular[:, :, k]       # Rotated Zernike
+        diff = phase_angle - phase_normal                   # Residual Difference
 
         ax1 = axes[0][k]
         img1 = ax1.imshow(phase_normal, cmap=cmap, origin='lower', extent=extent)
         img1.set_clim(-1, 1)
         plt.colorbar(img1, ax=ax1, orientation='horizontal')
         ax1.plot(x, y, color='black', linestyle='--', alpha=0.5)
-        ax1.set_xlim([-RHO_APER, RHO_APER])
-        ax1.set_ylim([-RHO_APER, RHO_APER])
-
 
         ax2 = axes[1][k]
         img2 = ax2.imshow(phase_angle, cmap=cmap, origin='lower', extent=extent)
@@ -396,8 +541,6 @@ if __name__ == """__main__""":
         plt.colorbar(img2, ax=ax2, orientation='horizontal')
         ax2.plot(x, y, color='black', linestyle='--', alpha=0.5)
         ax2.plot(dx, dy, color='black', linestyle='-.')
-        ax2.set_xlim([-RHO_APER, RHO_APER])
-        ax2.set_ylim([-RHO_APER, RHO_APER])
 
         ax3 = axes[2][k]
         img3 = ax3.imshow(diff, cmap=cmap, origin='lower', extent=extent)
@@ -405,44 +548,45 @@ if __name__ == """__main__""":
         plt.colorbar(img3, ax=ax3, orientation='horizontal')
         ax3.plot(x, y, color='black', linestyle='--', alpha=0.5)
         ax3.plot(dx, dy, color='black', linestyle='-.')
-        # ax3.plot(dx_diff, dy_diff, color='red', linestyle='-.')
-        ax3.set_xlim([-RHO_APER, RHO_APER])
-        ax3.set_ylim([-RHO_APER, RHO_APER])
 
         if k == 0:
             ax1.set_ylabel('Nominal')
-            ax2.set_ylabel('15 deg rotation')
+            ax2.set_ylabel('%d deg rotation' % theta_deg)
             ax3.set_ylabel('Difference')
 
     for ax in axes.flatten():
+        ax.set_xlim([-RHO_APER, RHO_APER])
+        ax.set_ylim([-RHO_APER, RHO_APER])
         ax.set_xticks([])
         ax.set_yticks([])
         # ax.yaxis.set_visible(False)
-
     plt.show()
 
-
-    N_aberr = 33
+    # Now we calculate for each Zernike polynomial, how the residual aberration changes with rotation angle
+    # we evaluate the RMS of the residual phase and compare it to the RMS of the original Zernike
+    N_aberr = 10            # How many Zernike polynomials to consider
     N_theta = 360
     theta_shift = np.linspace(0, N_theta, N_theta)
-    pv_resi = np.zeros((N_aberr, N_theta))
-    rms_resi = np.zeros((N_aberr, N_theta))
+    pv_resi = np.zeros((N_aberr, N_theta))              # Peak-to-Valley of residual aberration
+    rms_resi = np.zeros((N_aberr, N_theta))             # RMS of the residual aberration
     for k in range(N_theta):
+        # Calculate the Zernike matrix for each value of rotation angle
         t_shift = np.deg2rad(theta_shift[k])
         angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
-                                              radial_oversize=1, theta_shift=t_shift)
+                                              radial_oversize=1.1, theta_shift=t_shift)
         zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
 
         for j in range(N_aberr):
+            # Loop over the Zernike polynomials
             phase_normal = zernike_matrix[:, :, j]
             rms_normal = np.std(phase_normal[pupil_mask_zernike])
             phase_angle = zernike_matrix_angular[:, :, j]
             diff = phase_angle - phase_normal
             rms_angle = np.std(diff[pupil_mask_zernike])
-            pv_resi[j, k] = (np.max(diff) - np.min(diff)) / 2
-            rms_resi[j, k] = rms_angle / rms_normal
+            pv_resi[j, k] = (np.max(diff) - np.min(diff)) / 2           # Half of the PV (i.e. Amplitude)
+            rms_resi[j, k] = rms_angle / rms_normal                     # Ratio of RMS
 
-
+    # Show the ratio of RMS for some low order aberrations
     idx = [4, 0, 3, 7]
     colors = cm.coolwarm(np.linspace(0, 1.0, len(idx)))
     labels = ['Coma', 'Astigmatism', 'Trefoil',  'Quatrefoil']
@@ -456,8 +600,9 @@ if __name__ == """__main__""":
     plt.ylim([0, 2])
     plt.xlim([0, N_theta])
     plt.show()
+    # We can see that the number of peaks depends on the Azimuth order m of the Zernike polynomial
 
-
+    # Show a zoom at small rotation angles where the behaviour is linear and calculate the derivative
     plt.figure()
     derivatives = []
     for j, lab, col in zip(idx, labels, colors):
@@ -480,13 +625,15 @@ if __name__ == """__main__""":
     for max_k in max_idx:
         print(norm(der_vector[:max_k]))
 
-
+    # Now we look at wavefront maps with random aberrations (all Zernike polynomials at once
     N_samples = 1
     N_theta = 200
     theta_shift_rand = np.linspace(0, 25, N_theta)
     rms_errors = np.zeros((N_samples, N_theta))
+    # What if instead of applying the full correction, we only substract a certain percentage (beta)
+    # of the aberration? We saw that this helps with actuator misalignments
     rms_errors_beta = np.zeros((N_samples, N_theta))
-    beta = 0.75
+    beta = 0.75     # we subtract only 75% of the rotated map
     for k in range(N_theta):
         t_shift = np.deg2rad(theta_shift_rand[k])
         angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
@@ -494,8 +641,11 @@ if __name__ == """__main__""":
         zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
 
         for j in range(N_samples):
+            # Coef0 assumes a uniform distribution of the Zernike coefficients
             coef0 = np.random.uniform(low=-1, high=1, size=N_zern)
-            ratio = np.logspace(0, -1, N_zern)
+            # but what if we damped the high orders by rescaling with a decaying ratio?
+            # ratio = np.logspace(0, -1, N_zern)
+            ratio = 1
             coef0 *= ratio
             phase_normal = np.dot(zernike_matrix, coef0)
             rms_normal = np.std(phase_normal[pupil_mask_zernike])
@@ -509,28 +659,29 @@ if __name__ == """__main__""":
             rms_angle_beta = np.std(diff_beta[pupil_mask_zernike])
             rms_errors_beta[j, k] = rms_angle_beta / rms_normal
 
-
     idx = [4, 0, 3, 7]
     colors = cm.coolwarm(np.linspace(0, 1.0, len(idx)))
     labels = ['Coma', 'Astigmatism', 'Trefoil',  'Quatrefoil']
     linestyles = ['solid', 'dotted', 'dashed', 'dashdot']
-    fig, (ax1, ax2) = plt.subplots(2, 1)
-    for j, lab, col, ls in zip(idx, labels, colors, linestyles):
-        ax1.plot(theta_shift, rms_resi[j], label=lab, color=col, linestyle=ls)
-    ax1.legend(title=r'Zernike Aberration', loc=4)
-    ax1.set_xticks([])
-
-    for j in range(N_samples):
-        ax2.scatter(theta_shift_rand, rms_errors[j], s=3, color='black')
-    ax2.set_xlabel(r'Misalignment [deg]')
-
-    for ax in [ax1, ax2]:
-        ax.set_ylabel(r'Residual RMS ratio')
-
-        ax.set_ylim([0, 2])
-        ax.set_xlim([0, 360])
+    # fig, (ax1, ax2) = plt.subplots(2, 1)
+    #
+    # for j, lab, col, ls in zip(idx, labels, colors, linestyles):
+    #     ax1.plot(theta_shift, rms_resi[j], label=lab, color=col, linestyle=ls)
+    # ax1.legend(title=r'Zernike Aberration', loc=4)
+    # ax1.set_xticks([])
+    #
+    # # Now
+    # for j in range(N_samples):
+    #     ax2.scatter(theta_shift_rand, rms_errors[j], s=3, color='black')
+    # ax2.set_xlabel(r'Misalignment [deg]')
+    #
+    # for ax in [ax1, ax2]:
+    #     ax.set_ylabel(r'Residual RMS ratio')
+    #
+    #     ax.set_ylim([0, 2])
+    #     ax.set_xlim([0, 25])
+    # # plt.show()
     # plt.show()
-    plt.show()
 
     ###
     plt.figure()
@@ -551,12 +702,139 @@ if __name__ == """__main__""":
     plt.grid(True)
     plt.show()
 
+    #
+
+    N_iter = 4
+    RMS_evo_nom, residuals_nom = calib_zern.calibrate_iterations(test_images=test_PSF_zern, test_coefs=test_coef_zern,
+                                                                      wavelength=WAVE, N_iter=N_iter,
+                                                                      readout_noise=False, RMS_readout=1. / SNR)
+
+    strehl_nom = calculate_strehl(PSF_model=PSF_actuators, coeff=residuals_nom)
+    mu_nom, std_nom = np.mean(strehl_nom), np.std(strehl_nom)
+
+    ## === ##
+    N_iter = 4
+    theta_deg = 10
+    N_angles = 5
+    rotation = np.linspace(0.0, theta_deg, N_angles)
+    mean_strehls = np.zeros((N_iter + 1, N_angles))
+    q5, q95 = np.zeros((N_iter + 1, N_angles)), np.zeros((N_iter + 1, N_angles))
+    for j in range(N_angles):
+        print("\nAngle %.1f" % rotation[j])
+        theta_shift = np.deg2rad(rotation[j])
+        angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                              radial_oversize=1.1, x_shift=None, theta_shift=theta_shift)
+        zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
+
+        PSF_zernike_angular = psf.PointSpreadFunction(matrices=angular_matrices, N_pix=N_PIX, crop_pix=pix,
+                                                      diversity_coef=defocus_zernike[0])
+
+        results_angular = calibrate_iterations_shift(calib_model=calib_zern, PSF_model=PSF_zernike, PSF_model_shift=PSF_zernike_angular,
+                                                     test_images=test_PSF_zern, test_coef=test_coef_zern, N_iter=N_iter, beta=1,
+                                                     cmap='jet')
+        wavefronts, RMS_evolution, strehl_evolution = results_angular
+        mean_strehls[j] = [np.mean(x) for x in strehl_evolution]
+        q5[j] = [np.percentile(x, 5) for x in strehl_evolution]
+        q95[j] = [np.percentile(x, 95) for x in strehl_evolution]
+    plt.show()
+    # plt.close('all')
+
+    colors = cm.Reds(np.linspace(0.25, 1.0, (N_iter + 1)))
+    plt.figure()
+    for k in range(N_iter + 1):
+
+        label = '%d [%.2f - %.2f]' % (k, q5[-1, k], q95[-1, k])
+        plt.plot(rotation, mean_strehls[:, k], color=colors[k], label=label)
+        plt.scatter(rotation, mean_strehls[:, k], color=colors[k], s=15)
+    plt.legend(title=r'Iteration [$Q_5-Q_{95}$]')
+    plt.ylabel(r'Strehl ratio [ ]')
+    plt.xlabel(r'Misalignment angle [deg]')
+    plt.ylim(bottom=0)
+    plt.yticks(np.arange(0.0, 1.1, 0.1))
+    plt.xlim([0, theta_deg])
+    plt.grid(True)
+    plt.show()
+
+    fig, axes = plt.subplots(1, 2)
+    N_iter = 4
+    theta_deg = 10
+    N_angles = 5
+
+    color_list = [cm.Reds(np.linspace(0.25, 1.0, (N_iter + 1))),
+                  cm.Blues(np.linspace(0.25, 1.0, (N_iter + 1)))]
+    betas = [1.0, 0.75]
+    for i in range(2):
+        rotation = np.linspace(0.0, theta_deg, N_angles)
+        mean_strehls = np.zeros((N_angles, N_iter + 1))
+        q5, q95 = np.zeros((N_angles, N_iter + 1)), np.zeros((N_angles, N_iter + 1))
+        for j in range(N_angles):
+            print("\nAngle %.1f" % rotation[j])
+            theta_shift = np.deg2rad(rotation[j])
+            angular_matrices = psf.zernike_matrix(N_levels=N_levels, rho_aper=RHO_APER, rho_obsc=RHO_OBSC, N_PIX=N_PIX,
+                                                  radial_oversize=1.1, x_shift=None, theta_shift=theta_shift)
+            zernike_matrix_angular, pupil_mask_angular, flat_zernike_angular = angular_matrices
+
+            PSF_zernike_angular = psf.PointSpreadFunction(matrices=angular_matrices, N_pix=N_PIX, crop_pix=pix,
+                                                          diversity_coef=defocus_zernike[0])
+
+            results_angular = calibrate_iterations_shift(calib_model=calib_zern, PSF_model=PSF_zernike, PSF_model_shift=PSF_zernike_angular,
+                                                         test_images=test_PSF_zern, test_coef=test_coef_zern, N_iter=N_iter,
+                                                         beta=betas[i],
+                                                         cmap='jet')
+            wavefronts, RMS_evolution, strehl_evolution = results_angular
+            mean_strehls[j] = [np.mean(x) for x in strehl_evolution]
+            q5[j] = [np.percentile(x, 5) for x in strehl_evolution]
+            q95[j] = [np.percentile(x, 95) for x in strehl_evolution]
 
 
+        ax = axes[i]
+        for k in range(N_iter + 1):
+            label = '%d [%.2f - %.2f]' % (k, q5[-1, k], q95[-1, k])
+            ax.plot(rotation, mean_strehls[:, k], color=color_list[i][k], label=label)
+            ax.scatter(rotation, mean_strehls[:, k], color=color_list[i][k], s=15)
+        ax.legend(title=r'Iteration [$Q_5-Q_{95}$]')
+        ax.set_ylabel(r'Strehl ratio [ ]')
+        ax.set_xlabel(r'Misalignment angle [deg]')
+        ax.set_ylim(bottom=0)
+        ax.set_yticks(np.arange(0.0, 1.1, 0.1))
+        ax.set_xlim([0, theta_deg])
+        ax.grid(True)
+        ax.set_title('Correction $\lambda=%.2f$' % betas[i])
+    plt.show()
 
 
+    means = np.zeros(N_iter + 1)
 
+    for k in range(N_iter + 1):
+        s_data = strehl_evolution[k]
+        q5[k] = np.percentile(s_data, 5)
+        q95[k] = np.percentile(s_data, 95)
+        means[k] = np.mean(s_data)
 
+    plt.figure()
+    plt.fill_between(x=np.arange(N_iter + 1), y1=q5, y2=q95, color='lightgreen', alpha=0.5)
+    plt.show()
+    # Shift
+
+    x_shift = [0.005 * RHO_APER, 0.0]
+    norm_shift = norm(x_shift)
+
+    x_arrow = x_shift[0] / norm_shift * 0.5 * RHO_APER
+    y_arrow = x_shift[1] / norm_shift * 0.5 * RHO_APER
+    # we first shift and then rotate
+    dx_arrow = x_arrow
+    dy_arrow = y_arrow
+    # dx_arrow = x_arrow * np.cos(theta_shift) - y_arrow * np.sin(theta_shift)
+    # dy_arrow = x_arrow * np.sin(theta_shift) + y_arrow * np.cos(theta_shift)
+
+    # ax2.arrow(x=0, y=0, dx=dx_arrow, dy=dy_arrow, head_width=0.05, color='k')
+
+    # x, y = 0.01 * RHO_APER * np.cos(t_shift), 0.01 * RHO_APER * np.sin(t_shift)
+
+    # rho = np.random.uniform(low=0.01, high=0.010) * RHO_APER
+    rho = 0.01 * RHO_APER
+    alfa = np.random.uniform(low=0, high=2 * np.pi)
+    x, y = rho * np.cos(alfa), rho * np.sin(alfa)
 
     # ================================================================================================================ #
     #                             Impact of Actuator -> Pupil Mapping errors
@@ -706,16 +984,6 @@ if __name__ == """__main__""":
 
     # For that we need to forget about the Zernikes otherwise it will make our live very difficult
 
-    def calculate_strehl(PSF_model, coeff):
-
-        N_PSF = coeff.shape[0]
-        strehl = np.zeros(N_PSF)
-        for j in range(N_PSF):
-            _p, s = PSF_model.compute_PSF(coeff[j])
-            strehl[j] = s
-
-        return strehl
-
     # Generate a training set based on the nominal PSF model (actuators)
     coef_strength_actu = coef_strength * 2
     train_PSF_actu, train_coef_actu, test_PSF_actu, test_coef_actu = calibration.generate_dataset(PSF_actuators, N_train, N_test,
@@ -741,114 +1009,6 @@ if __name__ == """__main__""":
     mu_nom, std_nom = np.mean(strehl_nom), np.std(strehl_nom)
 
     # Now we see what happens when the correction we apply is slightly off
-
-    from numpy.fft import fftshift, fft2
-
-    def compute_PSF_phase(PSF_model, phase, diversity=False):
-
-        phase0 = phase
-        if diversity:
-            phase0 += PSF_model.diversity_phase
-
-        pupil_function = PSF_model.pupil_mask * np.exp(1j * 2 * np.pi * phase0)
-        image = (np.abs(fftshift(fft2(pupil_function)))) ** 2
-        image /= PSF_model.PEAK
-
-        image = image[PSF_model.minPix:PSF_model.maxPix, PSF_model.minPix:PSF_model.maxPix]
-
-        return image
-
-
-    def calibrate_iterations_shift(calib_model, PSF_model, PSF_model_shift, test_images, test_coef, N_iter, beta=1.0):
-
-        coef0 = test_coef
-        # we begin by calculating the wavefronts
-        RMS0 = np.zeros(N_test)
-        wave0 = np.zeros((N_test, N_PIX, N_PIX))
-        for k in range(N_test):
-            wave0[k] = np.dot(PSF_model.model_matrix, coef0[k])
-            RMS0[k] = np.std(wave0[k][PSF_model.pupil_mask])
-
-        wavefronts = np.zeros((N_iter + 1, N_test, N_PIX, N_PIX))
-        wavefronts[0] = wave0
-
-        s0 = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
-        strehl_evolution = [s0]
-        RMS_evolution = [RMS0]
-
-        fig, axes = plt.subplots(N_iter, 3)
-
-        for j in range(N_iter):
-
-            rbefore = np.std(wave0[0][PSF_model.pupil_mask])
-            ax1 = axes[j][0]
-            img1 = ax1.imshow(wave0[0], cmap='RdBu', extent=extent)
-            plt.colorbar(img1, ax=ax1)
-            ax1.set_title(r'Wavefront Before | RMS: %.3f $\lambda$' % rbefore)
-            ax1.set_ylabel(r'Iteration #%d' % (j + 1))
-
-            print("\nIteration #%d" % (j + 1))
-            # (1) We begin by predicting the aberrations.
-            guess = calib_model.cnn_model.predict(test_images)
-
-            # (2) The residual wavefront is given by: the nominal WF we had, minus the "shifted" correction
-            new_PSF = np.zeros((N_test, pix, pix, 2))
-            new_wave = np.zeros((N_test, N_PIX, N_PIX))
-            RMS_after = np.zeros(N_test)
-            for k in range(N_test):
-                wavef_before = wave0[k]
-
-                # This is the KEY part. We apply a wavefront correction with the "SHIFTED" actuator model
-                # so the correction will be slightly wrong, compared to what we think are doing
-                bad_correction = beta * np.dot(PSF_model_shift.model_matrix, guess[k])
-                bad_residual = wavef_before - bad_correction
-                new_wave[k] = bad_residual
-                RMS_after[k] = np.std(bad_residual[PSF_model.pupil_mask])
-
-                if k == 0:
-                    ax2 = axes[j][1]
-                    img2 = ax2.imshow(bad_correction, cmap='RdBu', extent=extent)
-                    plt.colorbar(img2, ax=ax2)
-                    ax2.set_title(r'Correction #%d' % (j+1))
-                    cval_corr = max(-np.min(bad_correction), np.max(bad_correction))
-                    cval_wave = max(-np.min(wave0[0]), np.max(wave0[0]))
-                    cval = max(cval_corr, cval_wave)
-
-                    rafter = np.std(bad_residual[PSF_model.pupil_mask])
-                    ax3 = axes[j][2]
-                    img3 = ax3.imshow(bad_residual, cmap='RdBu', extent=extent)
-                    plt.colorbar(img3, ax=ax3)
-                    ax3.set_title(r'Residual Wavefront %.3f $\lambda$' % rafter)
-
-                    img1.set_clim(-cval, cval)
-                    img2.set_clim(-cval, cval)
-                    img3.set_clim(-cval, cval)
-
-                    for ax in axes[j]:
-                        ax.xaxis.set_visible(False)
-                        ax.yaxis.set_visible(False)
-                        ax.set_xlim([-RHO_APER, RHO_APER])
-                        ax.set_ylim([-RHO_APER, RHO_APER])
-
-                # Update the PSF images directly with the PHASE
-                # using the residual aberrations
-                new_PSF[k, :, :, 0] = compute_PSF_phase(PSF_model, phase=bad_residual)
-                new_PSF[k, :, :, 1] = compute_PSF_phase(PSF_model, phase=bad_residual, diversity=True)
-
-                #
-                # # Update the WF as well
-                # wave0[k] = bad_residual
-
-            test_images = calib_actuators.noise_effects.add_readout_noise(new_PSF, RMS_READ=1 / SNR)
-            s = np.mean(np.max(test_images[:, :, :, 0], axis=(1, 2)))
-            strehl_evolution.append(s)
-            RMS_evolution.append(RMS_after)
-            wave0 = new_wave
-            wavefronts[j + 1] = new_wave
-
-
-        return wavefronts, RMS_evolution, strehl_evolution
-
 
     test_PSF_actu_noisy = calib_actuators.noise_effects.add_readout_noise(test_PSF_actu, RMS_READ=1/SNR)
     N_iter = 4
