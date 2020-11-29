@@ -423,10 +423,10 @@ if __name__ == """__main__""":
                        "DIVERSITY": diversity}
 
     # Specify which realistic effects we want to include and their range
-    effects_dict = {"NYQUIST_ERRORS": {"ON": True, "MIN_ERR": -0.025, "MAX_ERR": 0.025},
-                    "DEFOCUS_ERRORS": {"ON": True, "MIN_ERR": -0.025, "MAX_ERR": 0.025},
-                    "ANAMORPHIC_ERRORS": {"ON": True, "MIN_ERR": -0.025, "MAX_ERR": 0.025},
-                    "FLAT_FIELD": {"ON": True, "MIN_ERR": -0.025, "MAX_ERR": 0.025},
+    effects_dict = {"NYQUIST_ERRORS": {"ON": True, "MIN_ERR": -0.05, "MAX_ERR": 0.05},
+                    "DEFOCUS_ERRORS": {"ON": True, "MIN_ERR": -0.05, "MAX_ERR": 0.05},
+                    "ANAMORPHIC_ERRORS": {"ON": True, "MIN_ERR": -0.05, "MAX_ERR": 0.05},
+                    "FLAT_FIELD": {"ON": True, "MIN_ERR": -0.05, "MAX_ERR": 0.05},
                     "READOUT_NOISE": {"ON": True, "MIN_SNR": 250, "MAX_SNR": 500}}
     effects_label = ["Nyquist Err"]
 
@@ -717,14 +717,14 @@ if __name__ == """__main__""":
     # Now Test outside the range
 
     # Specify which realistic effects we want to include and their range
-    effects_dict_range = {"NYQUIST_ERRORS": {"ON": True, "MIN_ERR": -0.075, "MAX_ERR": 0.075},
-                    "DEFOCUS_ERRORS": {"ON": True, "MIN_ERR": -0.075, "MAX_ERR": 0.075},
-                    "ANAMORPHIC_ERRORS": {"ON": True, "MIN_ERR": -0.075, "MAX_ERR": 0.075},
-                    "FLAT_FIELD": {"ON": True, "MIN_ERR": -0.075, "MAX_ERR": 0.075},
-                    "READOUT_NOISE": {"ON": True, "MIN_SNR": 250, "MAX_SNR": 750}}
+    effects_dict_range = {"NYQUIST_ERRORS": {"ON": True, "MIN_ERR": -0.10, "MAX_ERR": -0.05},
+                    "DEFOCUS_ERRORS": {"ON": True, "MIN_ERR": -0.10, "MAX_ERR": -0.05},
+                    "ANAMORPHIC_ERRORS": {"ON": True, "MIN_ERR": -0.10, "MAX_ERR": -0.05},
+                    "FLAT_FIELD": {"ON": True, "MIN_ERR": -0.10, "MAX_ERR": -0.05},
+                    "READOUT_NOISE": {"ON": True, "MIN_SNR": 250, "MAX_SNR": 500}}
 
     outrange_PSF = RealisticPSF(psf_model_param=psf_model_param, effects_dict=effects_dict_range)
-    N_test = 5000
+    N_test = 2500
     _t, _c, test_PSF_range, test_coef_range, errors_range = outrange_PSF.generate_dataset(0, N_test, coef_strength, rescale)
     errors_range = np.array(errors_range)
 
@@ -774,7 +774,8 @@ if __name__ == """__main__""":
 
         ax1 = axes[0][k]
         ax1.fill_between(x=[xmin_train, xmax_train], y1=0.9 * ymin, y2=1.0, color='lightgreen', alpha=0.5)
-        sc = ax1.scatter(errors_range[k], strehls_range, s=5, c=str0, cmap=plt.cm.get_cmap('Blues'))
+        # sc = ax1.scatter(errors_range[k], strehls_range, s=5, c='red', cmap=plt.cm.get_cmap('Blues'))
+        sc = ax1.scatter(errors_range[k], strehls_range, s=5, color='red')
         # sc.set_clim([np.min(str0), 1])
         # cb = plt.colorbar(sc, ax=ax1, orientation='horizontal')
         ax1.set_ylim([0.9 * ymin, 1.0])
