@@ -9,6 +9,7 @@ import h5py
 import keras
 from keras.layers import Dense, Conv2D, Flatten, Dropout, MaxPooling2D, UpSampling2D, AveragePooling2D
 from keras.models import Sequential, Input, Model, load_model
+from keras import regularizers
 from keras import backend as K
 from numpy.linalg import norm as norm
 
@@ -882,7 +883,7 @@ class CalibrationAutoencoder(object):
         slices.append(N_coef)
         return slices
 
-    def generate_datasets_autoencoder(self, N_train, N_test, coef_strength, rescale):
+    def generate_datasets_autoencoder(self, N_train, N_test, coef_strength, rescale, slice_mode='LowHigh'):
         """
         The training of the autoencoders requires pairs of "noisy" vs "clean" images
         For N_autoencoders we need (N_autoendocers + 1) datasets for training because
@@ -905,7 +906,7 @@ class CalibrationAutoencoder(object):
         coefs = coef_strength * np.random.uniform(low=-1, high=1, size=(N_samples, N_coef))
         # Rescale the coefficients to cover a wider range of RMS (so we can iterate)
         rescale_train = np.linspace(1.0, rescale, N_train)
-        rescale_test = np.linspace(1.0, 0.5, N_test)
+        rescale_test = np.linspace(1.0, rescale, N_test)
         rescale_coef = np.concatenate([rescale_train, rescale_test])
         coefs *= rescale_coef[:, np.newaxis]
 
@@ -915,17 +916,28 @@ class CalibrationAutoencoder(object):
         all_coefs = [coefs]
 
         # How to split the aberrations across autoencoders?
-        slices_zernike = self.slice_zernike_polynomials()
-        print(slices_zernike)
-        for _min, _max in utils.pairwise(slices_zernike):
-            zeroed_coef = coefs.copy()
-            sliced_coef = coefs[:, _min:_max]
-            zeroed_coef[:, :_min] *= 0.0    # remove the other coefficients
-            zeroed_coef[:, _max:] *= 0.0
-            # print(zeroed_coef[0])
-            # In order to reuse the same model to generate all datasets we simply mask [zero] the coefficients
-            PSF_AE.append(self.compute_PSF(zeroed_coef))
-            all_coefs.append(sliced_coef)
+        if slice_mode == "LowHigh":
+            slices_zernike = self.slice_zernike_polynomials()
+            print(slices_zernike)
+            for _min, _max in utils.pairwise(slices_zernike):
+                zeroed_coef = coefs.copy()
+                sliced_coef = coefs[:, _min:_max]
+                zeroed_coef[:, :_min] *= 0.0    # remove the other coefficients
+                zeroed_coef[:, _max:] *= 0.0
+                # print(zeroed_coef[0])
+                # In order to reuse the same model to generate all datasets we simply mask [zero] the coefficients
+                PSF_AE.append(self.compute_PSF(zeroed_coef))
+                all_coefs.append(sliced_coef)
+        if slice_mode == "Balanced":
+            for k in range(self.N_autoencoders):
+                copy_coef = coefs.copy()
+                sliced_coef = coefs[:, k::self.N_autoencoders]
+                zeroed_coef = np.zeros_like(coefs)
+                zeroed_coef[:, k::self.N_autoencoders] = sliced_coef
+                PSF_AE.append(self.compute_PSF(zeroed_coef))
+                all_coefs.append(sliced_coef)
+
+
         return PSF_AE, all_coefs
 
     def create_autoencoder_model(self, encoder_filters, decoder_filters, kernel_size, name, activation='relu',
@@ -955,18 +967,18 @@ class CalibrationAutoencoder(object):
         # Encoder Part
         model.add(Conv2D(encoder_filters[0], kernel_size=(kernel_size, kernel_size), strides=(1, 1),
                          activation=activation, input_shape=input_shape, padding='same'))
-        # model.add(MaxPooling2D(pool_size=(2, 2)))
-        model.add(AveragePooling2D(pool_size=(2, 2)))
+        model.add(MaxPooling2D(pool_size=(2, 2)))
+        # model.add(AveragePooling2D(pool_size=(2, 2)))
         for N_filters in encoder_filters[1:]:
             model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation, padding='same'))
-            # model.add(MaxPooling2D(pool_size=(2, 2)))
-            model.add(AveragePooling2D(pool_size=(2, 2)))
+            model.add(MaxPooling2D(pool_size=(2, 2)))
+            # model.add(AveragePooling2D(pool_size=(2, 2)))
 
         # Decoder Part
         for N_filters in decoder_filters:
             model.add(Conv2D(N_filters, (kernel_size, kernel_size), activation=activation, padding='same'))
             model.add(UpSampling2D((2, 2)))
-        model.add(Conv2D(2 * N_waves, (kernel_size, kernel_size), activation='sigmoid', padding='same'))
+        model.add(Conv2D(2 * N_waves, (kernel_size, kernel_size), activation='relu', padding='same'))
         model.summary()
         model.compile(optimizer='adam', loss=loss)
 
@@ -1009,6 +1021,8 @@ class CalibrationAutoencoder(object):
 
                 _model.fit(train_before_noisy, train_after_noisy, epochs=epochs_per_loop, shuffle=True,
                           verbose=1, validation_data=(test_before_noisy, test_after_noisy), callbacks=[_metric])
+                del train_before_noisy
+                del train_after_noisy
 
             # Save the models after training
             if save_directory is not None:
@@ -1053,7 +1067,7 @@ class CalibrationAutoencoder(object):
         return
 
     def create_calibration_models(self, layer_filters, kernel_size, name, activation='relu',
-                                  mode='Decoded', load_directory=None):
+                                  mode='Decoded', slice_mode='LowHigh', load_directory=None):
         """
         The Autoencoders are in charge of "denoising" the PSF images to avoid feature contamination
         but do not provide any estimation of the aberrations
@@ -1070,65 +1084,122 @@ class CalibrationAutoencoder(object):
         :return:
         """
 
+        if slice_mode == "LowHigh":
+            slices_zernike = self.slice_zernike_polynomials()      # How to split the Model Matrix across autoencoders?
+            self.calibration_models = []
+            for i, (_min, _max) in enumerate(utils.pairwise(slices_zernike)):
+                print("Creating calibration network")
 
-        slices_zernike = self.slice_zernike_polynomials()      # How to split the Model Matrix across autoencoders?
-        self.calibration_models = []
-        for i, (_min, _max) in enumerate(utils.pairwise(slices_zernike)):
-            print("Creating calibration network")
+                # Copy the PSF model
+                _PSF_copy = copy.deepcopy(self.PSF_model)
+                N_zern = _max - _min                # How many Zernikes is this Autoencoder in charge of?
+                _PSF_copy.N_coef = N_zern
+                _PSF_copy.model_matrix = _PSF_copy.model_matrix[:, :, _min:_max]        # Slice the Model Matrix
+                _PSF_copy.model_matrix_flat = _PSF_copy.model_matrix_flat[:, _min:_max]      # Slice the Model Matrix flat
+                print(_PSF_copy.model_matrix_flat.shape)
 
-            # Copy the PSF model
-            _PSF_copy = copy.deepcopy(self.PSF_model)
-            N_zern = _max - _min                # How many Zernikes is this Autoencoder in charge of?
-            _PSF_copy.N_coef = N_zern
-            _PSF_copy.model_matrix = _PSF_copy.model_matrix[:, :, _min:_max]        # Slice the Model Matrix
-            _PSF_copy.model_matrix_flat = _PSF_copy.model_matrix_flat[:, _min:_max]      # Slice the Model Matrix flat
-            print(_PSF_copy.model_matrix_flat.shape)
+                if mode == 'Encoded':
+                    # Find out what is the output shape of the Encoder
+                    encoder_shape = self.encoders[0].layers[-1].output_shape
+                    _crop = encoder_shape[1]
+                    _channels = encoder_shape[-1]
 
-            if mode == 'Encoded':
-                # Find out what is the output shape of the Encoder
-                encoder_shape = self.encoders[0].layers[-1].output_shape
-                _crop = encoder_shape[1]
-                _channels = encoder_shape[-1]
+                    crop_copy = _PSF_copy.crop_pix
+                    # Force the shapes for the input of the Calibration Models
+                    _PSF_copy.crop_pix = _crop
+                    _PSF_copy.N_waves = _channels // 2
 
-                crop_copy = _PSF_copy.crop_pix
-                # Force the shapes for the input of the Calibration Models
-                _PSF_copy.crop_pix = _crop
-                _PSF_copy.N_waves = _channels // 2
+                    _calib = Calibration(PSF_model=_PSF_copy)
 
-                _calib = Calibration(PSF_model=_PSF_copy)
+                    if load_directory is None:  # Create the Models
 
-                if load_directory is None:  # Create the Models
+                        _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                                activation=activation)
+                    else:  # Load the pre-trained models
+                        file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                        print("Loading Trained Model:", file_name)
+                        _calib.cnn_model = load_model(file_name)
 
-                    _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
-                                            activation=activation)
-                else:  # Load the pre-trained models
-                    file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
-                    print("Loading Trained Model:", file_name)
-                    _calib.cnn_model = load_model(file_name)
+                    # Restore the values to properly compute the PSF
+                    _PSF_copy.crop_pix = crop_copy
+                    _PSF_copy.N_waves = 1
 
-                # Restore the values to properly compute the PSF
-                _PSF_copy.crop_pix = crop_copy
-                _PSF_copy.N_waves = 1
+                elif mode == 'Decoded': # We work with the same dimensions. Do nothing
 
-            elif mode == 'Decoded': # We work with the same dimensions. Do nothing
+                    _calib = Calibration(PSF_model=_PSF_copy)
 
-                _calib = Calibration(PSF_model=_PSF_copy)
+                    if load_directory is None:  # Create the Models
 
-                if load_directory is None:  # Create the Models
+                        _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                                activation=activation)
+                    else:  # Load the pre-trained models
+                        file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                        print("Loading Trained Model:", file_name)
+                        _calib.cnn_model = load_model(file_name)
 
-                    _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
-                                            activation=activation)
-                else:  # Load the pre-trained models
-                    file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
-                    print("Loading Trained Model:", file_name)
-                    _calib.cnn_model = load_model(file_name)
+                self.calibration_models.append(_calib)
 
-            self.calibration_models.append(_calib)
+        if slice_mode == "Balanced":
+            N_total = self.PSF_model.N_coef
+
+            self.calibration_models = []
+            for i in range(self.N_autoencoders):
+                print("Creating calibration network")
+
+                # Copy the PSF model
+                _PSF_copy = copy.deepcopy(self.PSF_model)
+                slices = np.arange(i, N_total, self.N_autoencoders)
+                N_zern = slices.shape[0]  # How many Zernikes is this Autoencoder in charge of?
+                _PSF_copy.N_coef = N_zern
+                _PSF_copy.model_matrix = _PSF_copy.model_matrix[:, :, slices]  # Slice the Model Matrix
+                _PSF_copy.model_matrix_flat = _PSF_copy.model_matrix_flat[:, slices]  # Slice the Model Matrix flat
+                print(_PSF_copy.model_matrix_flat.shape)
+
+                if mode == 'Encoded':
+                    # Find out what is the output shape of the Encoder
+                    encoder_shape = self.encoders[0].layers[-1].output_shape
+                    _crop = encoder_shape[1]
+                    _channels = encoder_shape[-1]
+
+                    crop_copy = _PSF_copy.crop_pix
+                    # Force the shapes for the input of the Calibration Models
+                    _PSF_copy.crop_pix = _crop
+                    _PSF_copy.N_waves = _channels // 2
+
+                    _calib = Calibration(PSF_model=_PSF_copy)
+
+                    if load_directory is None:  # Create the Models
+
+                        _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                                activation=activation)
+                    else:  # Load the pre-trained models
+                        file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                        print("Loading Trained Model:", file_name)
+                        _calib.cnn_model = load_model(file_name)
+
+                    # Restore the values to properly compute the PSF
+                    _PSF_copy.crop_pix = crop_copy
+                    _PSF_copy.N_waves = 1
+
+                elif mode == 'Decoded': # We work with the same dimensions. Do nothing
+
+                    _calib = Calibration(PSF_model=_PSF_copy)
+
+                    if load_directory is None:  # Create the Models
+
+                        _calib.create_cnn_model(layer_filters, kernel_size, name=name + '_%d' % (i + 1),
+                                                activation=activation)
+                    else:  # Load the pre-trained models
+                        file_name = os.path.join(load_directory, name + '_%d.h5' % (i + 1))
+                        print("Loading Trained Model:", file_name)
+                        _calib.cnn_model = load_model(file_name)
+
+                self.calibration_models.append(_calib)
 
         return
 
     def clean_datasets_for_training(self, images, coefs, copies, RMS_readout,
-                                    mode='Decoded', show_images=False):
+                                    mode='Decoded', show_images=False, cmap='inferno'):
         """
         Using the PSF images, generate the datasets necessary to train the calibration models
         If mode == 'Decoded'
@@ -1155,11 +1226,13 @@ class CalibrationAutoencoder(object):
 
         images_copies, coefs_copies = [], []
 
-        # Add copies of the Nominal
+        # Add copies of the Nominal (All Zernikes)
         _nom_img, _nom_coef = [], []
         for n in range(copies):
-            # noisy = self.noise_effects.add_readout_noise(nominal_imgs, RMS_READ=RMS_readout)
-            noisy = nominal_imgs
+            # We contaminate them with noise because they will be repurposed to train the NOMINAL CALIBRATION model
+            # which takes into account all Zernikes. That way we can compare the performance to the AUTOENCODERS
+            noisy = self.noise_effects.add_readout_noise(nominal_imgs, RMS_READ=RMS_readout)
+            # noisy = nominal_imgs
             _nom_img.append(noisy)
             _nom_coef.append(nominal_coefs)
         images_copies.append(np.concatenate(_nom_img, axis=0))
@@ -1190,23 +1263,40 @@ class CalibrationAutoencoder(object):
             if show_images:
 
                 list_images = [noisy, truth[k], images_copies[k + 1]]
-                list_names = ['Noisy', 'Clean Truth', 'Clean Guess']
-                list_foc = ['_Nom', '_Foc']
+                list_names = [r'Noisy Input $\Phi$', 'Clean Truth', 'Clean Guess']
+                list_foc = ['Nominal PSF Channel', 'Defocused PSF Channel']
+                phi_label = [r'$\Phi_{low}$', r'$\Phi_{high}$']
 
                 # show the performance
                 for m in range(5):
-                    fig, axes = plt.subplots(2, 3)
+                    fig, axes = plt.subplots(2, 4)
                     for i in range(2):
-                        for j in range(3):
-                            idx = 3 * i + j
-                            # print(idx)
+                        for j in range(4):
+                            idx = 4 * i + j
                             ax = axes[i][j]
-                            _array = list_images[j]
-                            img = ax.imshow(_array[m*50, :, :, i], cmap='hot')
-                            ax.get_xaxis().set_visible(False)
-                            ax.get_yaxis().set_visible(False)
-                            plt.colorbar(img, ax=ax, orientation='horizontal')
-                            ax.set_title(list_names[j] + list_foc[i] + '_AE_%d' % (k + 1))
+                            ax.set_xticks([])
+                            ax.set_yticks([])
+                            ax.set_ylabel(list_foc[i])
+
+                            if j + 1 != 4:      # Normal images
+                                _array = list_images[j]
+                                img = ax.imshow(_array[m*50, :, :, i], cmap=cmap)
+                                plt.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
+                                if j == 0:
+                                    title = list_names[j]
+                                else:
+                                    title = list_names[j] + ' ' + phi_label[k] + r' | AE #%d' % (k + 1)
+                                ax.set_title(title)
+
+                            else:
+                                guess, real_data = list_images[2][m*50, :, :, i], list_images[1][m*50, :, :, i]
+                                diff = guess - real_data
+                                clim = max(-np.min(diff), np.max(diff))
+                                sigma = np.std(diff)
+                                img = ax.imshow(diff, cmap='bwr')
+                                img.set_clim(-clim, clim)
+                                plt.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
+                                ax.set_title(r'Residual difference $\sigma=%.1e$' % sigma)
         return images_copies, coefs_copies
 
 

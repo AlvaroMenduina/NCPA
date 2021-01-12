@@ -108,9 +108,6 @@ class PythonStandaloneApplication(object):
             return "Invalid"
 
 
-
-
-
 class POPAnalysisSWIFT(object):
     """
     POP Analysis for the SWIFT Image Slicer using the Python ZOS API
@@ -136,11 +133,12 @@ class POPAnalysisSWIFT(object):
                         2048: 7, 4096: 8}
         beam_types = {'top_hat': 3}
 
-
         # Hard-coded values
         surf_pupil_mirror = 16
-        waist_x = 0.125
-        waist_y = 0.125
+        # waist_x = 0.125
+        # waist_y = 0.125
+        waist_x = 0.185
+        waist_y = 0.185
         slice_size = 0.47  # Size of a slice at the exit focal plane (slits)
 
         # Get some info on the system
@@ -255,12 +253,99 @@ if __name__ == """__main__""":
     plt.rc('font', family='serif')
     plt.rc('text', usetex=False)
 
+    # Python - SWIFT Image Slicer
+    wave = 0.85                 # 850 nm
+    slice_width = 0.47          # 0.47 mm
+    N_pix = 2048
+    N_slices = 5
+    spaxels_per_slice = 20
+    spaxel_mas = 1/18  # to get a decent resolution
+    N_rings = spaxels_per_slice / 2
+    N_zeros = 3
+    pupil_mirror_aperture = N_zeros / N_rings
+
+    slicer_options = {"N_slices": N_slices, "spaxels_per_slice": spaxels_per_slice,
+                      "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": False}
+    SWIFT = slicers.SlicerModel(slicer_options=slicer_options, N_PIX=N_pix,
+                                  spaxel_scale=spaxel_mas, N_waves=1, wave0=wave, waveN=wave, wave_ref=wave)
+
+    complex_slicer, complex_mirror, exit_slit, slits = SWIFT.propagate_one_wavelength(wavelength=wave,
+                                                                                        wavefront=0)
+    masked_slicer = (np.abs(complex_slicer)) ** 2 * SWIFT.slicer_masks[N_slices // 2]
+
+    masked_pupil_mirror = (np.abs(complex_mirror[N_slices // 2])) ** 2 * SWIFT.pupil_mirror_mask[wave]
+    masked_pupil_mirror /= np.max(masked_pupil_mirror)
+    plt.figure()
+    plt.imshow(np.log10(masked_pupil_mirror), cmap='jet')
+    plt.colorbar()
+    plt.clim(vmin=-4)
+    plt.show()
+
+    masked_slit = exit_slit * SWIFT.slicer_masks[N_slices // 2]
+    # masked_slit = masked_slit[minPix_Y: maxPix_Y, minPix_X: maxPix_X]
+    plt.figure()
+    plt.imshow(masked_slit, cmap='jet')
+    plt.colorbar(orientation='horizontal')
+    plt.xlabel(r'X [m.a.s]')
+    plt.ylabel(r'Y [m.a.s]')
+    # plt.title('Pupil Mirror: Aperture %.2f PSF zeros' % rings_we_want)
+
+    plt.plot(masked_slit[:, N_pix//2])
+    plt.show()
+
+    # masked_slicer /= np.max(masked_slicer)
+    minPix_Y = (self.N_pix + 1 - self.plot_slices * spaxels_per_slice) // 2  # Show 2 slices
+    maxPix_Y = (self.N_pix + 1 + self.plot_slices * spaxels_per_slice) // 2
+    minPix_X = (self.N_pix + 1 - self.plot_slices * spaxels_per_slice) // 2
+    maxPix_X = (self.N_pix + 1 + self.plot_slices * spaxels_per_slice) // 2
+    # masked_slicer = masked_slicer[minPix_Y:maxPix_Y, minPix_X:maxPix_X]
+
+    dX, dY = maxPix_X - minPix_X, maxPix_Y - minPix_Y  # How many pixels in the masked window
+    masX, masY = dX * spaxel_mas, dY * spaxel_mas
+    python_extent = [-masX / 2, masX / 2, -masY / 2, masY / 2]
+
+    python_slit = slits[N_slices // 2 + index_slice]
+    python_slit = python_slit[minPix_Y: maxPix_Y, minPix_X: maxPix_X]
+    python_slit /= np.max(python_slit)
+
+
+    # ======================================== POP =================================================================== #
 
     # Create a Python Standalone Application
     psa = PythonStandaloneApplication()
-    zemax_path = os.path.abspath("D:\Research\Experimental\SWIFT Final System")
-    zemax_file = "SWIFT_SLICER_FINAL_VERSION.zmx"
+    zemax_path = os.path.abspath("D:\Research\Experimental\Data\Results\Zemax")
     results_path = os.path.join(zemax_path, 'POP')
+    zemax_file = "CompleteSystemPOP.zmx"
+
+    sampling = 128
+    phys_width = sampling * 13.5 / 1000
+
+    pop_analysis = POPAnalysisSWIFT(zosapi=psa)
+    all_slices = []
+    for i, config in enumerate([19, 20, 21, 22]):
+        pop_settings = {'CONFIG': config, 'N_PIX': 1024, 'SAMPLING': sampling,
+                        'X_WIDTH': phys_width, 'Y_WIDTH': phys_width, 'WAVE_IDX': 1}
+        pop_data, cresults = pop_analysis.run_pop(zemax_path=zemax_path, zemax_file=zemax_file, settings=pop_settings)
+        # We have to transpose the PSF because of the weird XY coordinates of the Zemax file
+        all_slices.append(pop_data.T)
+        minX, minY = cresults.GetDataGrid(0).MinY, cresults.GetDataGrid(0).MinX
+        extent = [minX, -minX, minY, -minY]
+        #
+        # ax = axes[i]
+        # img = ax.imshow(np.log10(pop_data.T), origin='lower', extent=extent)
+        # # plt.colorbar(img, ax=ax)
+        # ax.set_title(r'Slice #%d' % config)
+        # ax.set_xlabel(r'X [mm]')
+        # ax.set_ylabel(r'Y [mm]')
+
+    psf = np.array(all_slices)
+    psf = np.sum(psf, axis=0)
+
+
+
+
+    # ==========
+
 
     zemax_wavelengths = {1: 0.65, 2: 0.85, 3: 1.00}
     wave_idx = 2
