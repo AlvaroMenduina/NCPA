@@ -254,6 +254,7 @@ if __name__ == """__main__""":
     plt.rc('text', usetex=False)
 
     # Python - SWIFT Image Slicer
+    wave0 = 0.85                 # 850 nm
     wave = 0.85                 # 850 nm
     slice_width = 0.47          # 0.47 mm
     N_pix = 2048
@@ -267,7 +268,7 @@ if __name__ == """__main__""":
     slicer_options = {"N_slices": N_slices, "spaxels_per_slice": spaxels_per_slice,
                       "pupil_mirror_aperture": pupil_mirror_aperture, "anamorphic": False}
     SWIFT = slicers.SlicerModel(slicer_options=slicer_options, N_PIX=N_pix,
-                                  spaxel_scale=spaxel_mas, N_waves=1, wave0=wave, waveN=wave, wave_ref=wave)
+                                  spaxel_scale=spaxel_mas, N_waves=1, wave0=wave0, waveN=wave, wave_ref=wave)
 
     complex_slicer, complex_mirror, exit_slit, slits = SWIFT.propagate_one_wavelength(wavelength=wave,
                                                                                         wavefront=0)
@@ -275,11 +276,11 @@ if __name__ == """__main__""":
 
     masked_pupil_mirror = (np.abs(complex_mirror[N_slices // 2])) ** 2 * SWIFT.pupil_mirror_mask[wave]
     masked_pupil_mirror /= np.max(masked_pupil_mirror)
-    plt.figure()
-    plt.imshow(np.log10(masked_pupil_mirror), cmap='jet')
-    plt.colorbar()
-    plt.clim(vmin=-4)
-    plt.show()
+    # plt.figure()
+    # plt.imshow(np.log10(masked_pupil_mirror), cmap='jet')
+    # plt.colorbar()
+    # plt.clim(vmin=-4)
+    # plt.show()
 
     masked_slit = exit_slit * SWIFT.slicer_masks[N_slices // 2]
     # masked_slit = masked_slit[minPix_Y: maxPix_Y, minPix_X: maxPix_X]
@@ -317,13 +318,15 @@ if __name__ == """__main__""":
     results_path = os.path.join(zemax_path, 'POP')
     zemax_file = "CompleteSystemPOP.zmx"
 
-    sampling = 128
+    sampling = 256
     phys_width = sampling * 13.5 / 1000
+    xmax = phys_width / 2
+    extent = [-xmax, xmax, -xmax, xmax]
 
     pop_analysis = POPAnalysisSWIFT(zosapi=psa)
     all_slices = []
     for i, config in enumerate([19, 20, 21, 22]):
-        pop_settings = {'CONFIG': config, 'N_PIX': 1024, 'SAMPLING': sampling,
+        pop_settings = {'CONFIG': config, 'N_PIX': 2048, 'SAMPLING': sampling,
                         'X_WIDTH': phys_width, 'Y_WIDTH': phys_width, 'WAVE_IDX': 1}
         pop_data, cresults = pop_analysis.run_pop(zemax_path=zemax_path, zemax_file=zemax_file, settings=pop_settings)
         # We have to transpose the PSF because of the weird XY coordinates of the Zemax file
@@ -340,7 +343,23 @@ if __name__ == """__main__""":
 
     psf = np.array(all_slices)
     psf = np.sum(psf, axis=0)
+    psf /= np.max(psf)
 
+    cmap = 'inferno'
+    fig, ax = plt.subplots(1, 1)
+    img = ax.imshow((psf), cmap=cmap, extent=extent)
+    # cbar = plt.colorbar(img, ax=ax)
+    # img.set_clim(-4)
+    ax.set_ylim([-0.5, 0.5])
+    ax.set_title(r'Zemax POP slices')
+    ax.set_xlabel(r'X Detector [mm]')
+    ax.set_ylabel(r'Y Detector [mm]')
+    plt.show()
+
+
+    plt.figure()
+
+    plt.show()
 
 
 
